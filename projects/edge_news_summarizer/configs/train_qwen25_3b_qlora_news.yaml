@@ -1,0 +1,49 @@
+### Model
+model_name_or_path: Qwen/Qwen2.5-3B-Instruct  # 或本地路径 ./models/Qwen2.5-3B-Instruct
+
+### Method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+
+### QLoRA
+quantization_bit: 4
+quantization_method: bitsandbytes
+
+### LoRA 超参
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+### Dataset
+dataset: news_structured_summary
+template: qwen
+cutoff_len: 1024
+max_samples: 10000
+overwrite_cache: true
+preprocessing_num_workers: 4
+
+### Output
+output_dir: projects/edge_news_summarizer/outputs/checkpoints/qwen25-3b-qlora-news
+logging_steps: 10
+save_steps: 500
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+
+### Training
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+fp16: true
+ddp_timeout: 180000000
+
+### Validation
+val_size: 0.1
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 500

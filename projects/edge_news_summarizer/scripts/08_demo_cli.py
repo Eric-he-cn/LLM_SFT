@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""
+08_demo_cli.py
+新闻结构化摘要 CLI Demo。
+
+功能：
+  - 交互式或批量模式
+  - 支持基座模型 / 微调模型（自动加载 LoRA adapter）
+  - 输入：新闻标题 + 正文（命令行交互 / txt / json 文件）
+  - 输出：结构化摘要（终端显示 + 可选保存）
+  - 显示推理耗时
+
+用法（交互模式）：
+  python scripts/08_demo_cli.py --model_path ./models/Qwen2.5-3B-Instruct
+
+用法（微调模型）：
+  python scripts/08_demo_cli.py \
+    --model_path ./models/Qwen2.5-3B-Instruct \
+    --adapter_path ./outputs/checkpoints/qwen25-3b-qlora-news
+
+用法（批量处理文件）：
+  python scripts/08_demo_cli.py \
+    --model_path ./models/Qwen2.5-3B-Instruct \
+    --input_file data/cleaned/test.json \
+    --output_file outputs/eval/demo_outputs.jsonl \
+    --num_samples 20
+"""
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+EVAL_DIR = PROJECT_DIR / "outputs" / "eval"
+EVAL_DIR.mkdir(parents=True, exist_ok=True)
+
+PROMPT_TEMPLATE_FILE = PROJECT_DIR / "data" / "prompts" / "label_prompt_news_structured.txt"
+
+SYSTEM_PROMPT = "你是一位专业的新闻编辑助手，请对新闻进行结构化摘要分析。"
+
+
+def load_prompt_template() -> str:
+    if PROMPT_TEMPLATE_FILE.exists():
+        return PROMPT_TEMPLATE_FILE.read_text(encoding="utf-8")
+    return (
+        "新闻标题：{title}\n\n新闻正文：\n{content}\n\n"
+        "请按以下格式输出结构化摘要：\n"
+        "【一句话摘要】\n【核心要点】\n【事件类别】\n【主要主体】\n【时间信息】\n【潜在影响】"
+    )
+
+
+def load_model(model_path: str, adapter_path: str | None = None,
+               device: str = "cuda", quantize: bool = False):
+    """加载模型和 tokenizer。"""
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError:
+        print("[ERROR] 请先安装 transformers: pip install transformers torch", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[INFO] 加载 tokenizer: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+    print(f"[INFO] 加载模型: {model_path}")
+    load_kwargs = {"trust_remote_code": True}
+
+    if device == "cuda":
+        import torch
+        if quantize:
+            try:
+                load_kwargs["quantization_config"] = __import__(
+                    "transformers").BitsAndBytesConfig(load_in_4bit=True)
+                load_kwargs["device_map"] = "auto"
+            except Exception as e:
+                print(f"[WARN] 4-bit 量化失败: {e}，回退到 float16")
+                load_kwargs["torch_dtype"] = torch.float16
+                load_kwargs["device_map"] = "auto"
+        else:
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+    else:
+        load_kwargs["torch_dtype"] = __import__("torch").float32
+
+    model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+
+    if adapter_path:
+        try:
+            from peft import PeftModel
+            print(f"[INFO] 加载 LoRA adapter: {adapter_path}")
+            model = PeftModel.from_pretrained(model, adapter_path)
+            print("[INFO] LoRA adapter 加载成功")
+        except ImportError:
+            print("[ERROR] 请先安装 peft: pip install peft", file=sys.stderr)
+            sys.exit(1)
+
+    model.eval()
+    print("[INFO] 模型加载完成！\n")
+    return model, tokenizer
+
+
+def generate_summary(model, tokenizer, title: str, content: str,
+                     prompt_template: str, max_new_tokens: int = 512,
+                     temperature: float = 0.1) -> tuple[str, float]:
+    """生成结构化摘要，返回（摘要文本, 耗时秒）。"""
+    import torch
+
+    # 构建输入
+    content_truncated = content[:3000] if len(content) > 3000 else content
+    user_content = prompt_template.format(title=title, content=content_truncated)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        input_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+        )
+    except Exception:
+        text = f"{SYSTEM_PROMPT}\n\n{user_content}"
+        input_ids = tokenizer(text, return_tensors="pt").input_ids
+
+    # 检测设备
+    try:
+        device = next(model.parameters()).device
+        input_ids = input_ids.to(device)
+    except Exception:
+        pass
+
+    start = time.perf_counter()
+    with torch.no_grad():
+        generated = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=temperature > 0.01,
+            pad_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.1,
+        )
+    elapsed = time.perf_counter() - start
+
+    output_ids = generated[0][input_ids.shape[-1]:]
+    output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
+    return output_text.strip(), elapsed
+
+
+def print_result(title: str, output: str, elapsed: float) -> None:
+    print("\n" + "=" * 60)
+    print(f"新闻标题：{title[:60]}")
+    print("=" * 60)
+    print(output)
+    print("-" * 60)
+    print(f"⏱ 推理耗时：{elapsed:.3f}s")
+    print("=" * 60 + "\n")
+
+
+def interactive_mode(model, tokenizer, prompt_template: str,
+                     max_new_tokens: int, save_path: Path | None) -> None:
+    """交互式 CLI 模式。"""
+    print("===== 新闻结构化摘要 Demo =====")
+    print("输入 'quit' 或 'exit' 退出，输入 'clear' 清屏\n")
+
+    results = []
+
+    while True:
+        title = input("请输入新闻标题（或 'quit' 退出）：").strip()
+        if title.lower() in ("quit", "exit", "q"):
+            break
+        if title.lower() == "clear":
+            print("\033[2J\033[H")
+            continue
+
+        print("请输入新闻正文（输入空行结束）：")
+        lines = []
+        while True:
+            line = input()
+            if not line:
+                break
+            lines.append(line)
+        content = "\n".join(lines).strip()
+
+        if not content:
+            print("[WARN] 正文为空，跳过。\n")
+            continue
+
+        print("\n[INFO] 正在生成摘要...")
+        output, elapsed = generate_summary(
+            model, tokenizer, title, content, prompt_template, max_new_tokens
+        )
+        print_result(title, output, elapsed)
+
+        result = {"title": title, "content": content[:500], "output": output, "elapsed_s": elapsed}
+        results.append(result)
+
+        if save_path:
+            with open(save_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+    print(f"\n共生成 {len(results)} 条摘要。")
+    if save_path:
+        print(f"结果已保存: {save_path}")
+
+
+def batch_mode(model, tokenizer, prompt_template: str, input_file: Path,
+               output_file: Path, num_samples: int, max_new_tokens: int) -> None:
+    """批量处理模式。"""
+    with open(input_file, encoding="utf-8") as f:
+        if input_file.suffix == ".json":
+            data = json.load(f)
+            if not isinstance(data, list):
+                data = [data]
+        else:
+            data = [json.loads(line) for line in f if line.strip()]
+
+    if num_samples > 0:
+        data = data[:num_samples]
+
+    print(f"[INFO] 批量处理 {len(data)} 条记录...")
+
+    with open(output_file, "w", encoding="utf-8") as out_f:
+        for i, record in enumerate(data, 1):
+            title = record.get("title", "")
+            content = record.get("content", record.get("input", ""))
+
+            # 如果是 Alpaca 格式，从 input 字段提取
+            if not title and "input" in record:
+                input_text = record["input"]
+                # 尝试提取标题
+                lines = input_text.split("\n")
+                for line in lines:
+                    if line.startswith("新闻标题："):
+                        title = line.replace("新闻标题：", "").strip()
+                    elif line.startswith("新闻正文："):
+                        content_start = input_text.find("新闻正文：")
+                        content = input_text[content_start + 5:].strip() if content_start >= 0 else input_text
+
+            if not content:
+                continue
+
+            print(f"[{i:3d}/{len(data)}] 处理: {title[:50] or '(无标题)'}")
+            output, elapsed = generate_summary(
+                model, tokenizer, title, content, prompt_template, max_new_tokens
+            )
+
+            result = {
+                "id": record.get("id", f"batch_{i}"),
+                "title": title,
+                "reference": record.get("output", ""),
+                "prediction": output,
+                "elapsed_s": elapsed,
+            }
+            out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+            if i % 10 == 0:
+                out_f.flush()
+
+    print(f"\n[INFO] 批量处理完成！结果已保存: {output_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="新闻结构化摘要 CLI Demo")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="基座模型路径（本地目录或 HuggingFace 模型名）")
+    parser.add_argument("--adapter_path", type=str, default=None,
+                        help="LoRA adapter 路径（可选）")
+    parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--quantize", action="store_true", help="使用 4-bit 量化（需要 bitsandbytes）")
+    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.1)
+
+    # 批量模式参数
+    parser.add_argument("--input_file", type=str, default=None,
+                        help="批量输入文件路径（JSON 或 JSONL）")
+    parser.add_argument("--output_file", type=str,
+                        default=str(EVAL_DIR / "demo_outputs.jsonl"),
+                        help="批量输出文件路径")
+    parser.add_argument("--num_samples", type=int, default=0,
+                        help="批量模式处理样本数（0 表示全部）")
+
+    args = parser.parse_args()
+
+    model, tokenizer = load_model(args.model_path, args.adapter_path,
+                                  args.device, args.quantize)
+    prompt_template = load_prompt_template()
+
+    if args.input_file:
+        input_path = Path(args.input_file)
+        if not input_path.exists():
+            print(f"[ERROR] 输入文件不存在: {input_path}", file=sys.stderr)
+            sys.exit(1)
+        batch_mode(model, tokenizer, prompt_template, input_path,
+                   Path(args.output_file), args.num_samples, args.max_new_tokens)
+    else:
+        save_path = EVAL_DIR / "demo_outputs.jsonl" if args.output_file else None
+        interactive_mode(model, tokenizer, prompt_template,
+                         args.max_new_tokens, Path(args.output_file) if args.output_file else None)
+
+
+if __name__ == "__main__":
+    main()
