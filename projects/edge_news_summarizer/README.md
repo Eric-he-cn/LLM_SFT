@@ -27,13 +27,13 @@
 
 ## 项目概述
 
-本项目实现了一个**端到端的新闻结构化摘要微调系统**，通过 QLoRA（Quantized Low-Rank Adaptation）技术在消费级 GPU 上高效训练大语言模型，使其能够将新闻文本转化为固定 6 字段格式的结构化摘要，适用于移动端、边缘设备的信息流展示。
+本项目实现了一个**端到端的新闻结构化摘要微调系统**，通过 QLoRA（Quantized Low-Rank Adaptation）技术在消费级 GPU 上高效训练大语言模型，使其能够将新闻文本转化为固定 6 字段格式的结构化摘要，适用于客户终端、边缘设备的信息流展示。
 
 **核心技术栈**：
-- **基座模型**：Qwen3-4B / Qwen3-8B（阿里云通义千问）
+- **基座模型**：Qwen3-4B / Qwen3-8B
 - **微调框架**：LLaMA-Factory（支持 QLoRA、4-bit NF4 量化）
-- **数据来源**：XL-Sum 多语言新闻数据集（BBC）
-- **标注方案**：DeepSeek API（低成本、高质量结构化标注）
+- **数据来源**：XL-Sum 多语言新闻数据集
+- **标注方案**：DeepSeek API
 
 **输出格式示例**：
 ```
@@ -49,8 +49,8 @@
 
 ## 核心特性
 
-- **六字段结构化输出**：固定格式输出，零后处理直接适配 UI 渲染
-- **QLoRA 参数高效微调**：4-bit 量化 + LoRA 低秩适配，16GB 显存可训练 8B 模型
+- **固定字段结构化输出**：固定格式输出，零后处理直接适配 UI 渲染
+- **QLoRA 参数高效微调**：4-bit 量化 + LoRA 低秩适配，消费级显卡 16GB 显存可训练
 - **异步数据标注流水线**：DeepSeek API 异步并发打标（5 并发 ~50 条/分钟），成本 <￥15/1000 条
 - **多维度评测体系**：ROUGE-L、格式合规率、推理延迟三维评测
 - **基座/微调对比工具**：内置并排对比模式，量化微调收益
@@ -77,7 +77,7 @@
 conda create -n my_sft python=3.11 -y
 conda activate my_sft
 
-# 安装 PyTorch（CUDA 12.8）
+# 安装 PyTorch（以CUDA 12.8为例）
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # 验证 GPU 可用性
@@ -99,14 +99,14 @@ pip install -U datasets pandas tqdm pydantic python-dotenv openai \
                rouge-score jieba bitsandbytes pyyaml jsonlines
 ```
 
-### 4. 配置 API 凭据
+### 4. 配置 API 凭据（以deepseek为例）
 
 ```bash
 cp projects/edge_news_summarizer/.env.example projects/edge_news_summarizer/.env
 # 编辑 .env 填入：
 # OPENAI_API_KEY=sk-xxxx          # DeepSeek API Key
-# OPENAI_API_BASE=https://api.deepseek.com
-# OPENAI_MODEL=deepseek-chat
+# OPENAI_API_BASE=https://api.deepseek.com  
+# OPENAI_MODEL=deepseek-chat  
 ```
 
 ### 5. 下载基座模型
@@ -114,10 +114,10 @@ cp projects/edge_news_summarizer/.env.example projects/edge_news_summarizer/.env
 ```python
 from huggingface_hub import snapshot_download
 
-# Qwen3-4B（推荐用于快速验证）
+# Qwen3-4B
 snapshot_download("Qwen/Qwen3-4B", local_dir=r"D:\LLM\models\Qwen3-4B")
 
-# Qwen3-8B（生产级质量）
+# Qwen3-8B
 snapshot_download("Qwen/Qwen3-8B", local_dir=r"D:\LLM\models\Qwen3-8B")
 ```
 
@@ -136,7 +136,7 @@ python projects/edge_news_summarizer/scripts/01_collect_news.py \
   --source xlsum --lang mixed --max_samples 6000
 ```
 
-**输出**：`data/raw/news_raw.jsonl` (~4,800 条记录)
+**输出**：`data/raw/news_raw.jsonl` (过滤后约4,800 条记录)
 
 ### Step 2: 结构化标注
 
@@ -147,7 +147,7 @@ python projects/edge_news_summarizer/scripts/02_generate_labels_api.py \
   --max_samples 0 --concurrency 5
 ```
 
-**输出**：`data/labeled/news_labeled_v1.jsonl` (~4,800 条)
+**输出**：`data/labeled/news_labeled_v1.jsonl` 
 
 ### Step 3: 校验与清洗
 
@@ -183,8 +183,8 @@ python projects/edge_news_summarizer/scripts/05_register_dataset_info.py
 
 **数据流示意**：
 ```
-XL-Sum (BBC) → 内容过滤 → DeepSeek API → 校验清洗 → 数据划分 → Alpaca 格式
-  ~200k         ~4,800      ~4,800        ~4,804      3,843/480/481   train.json
+XL-Sum (BBC) → 筛选+内容过滤 → DeepSeek API → 校验清洗 → 数据划分 → Alpaca 格式
+  ~200k           ~4,800      ~4,800        ~4,804  3,843/480/481   train.json
 ```
 
 ---
@@ -193,7 +193,7 @@ XL-Sum (BBC) → 内容过滤 → DeepSeek API → 校验清洗 → 数据划分
 
 本项目采用 **QLoRA（Quantized Low-Rank Adaptation）** 微调方法，在 16GB 显存上高效训练 4B/8B 模型。技术细节见 [Technical Details](#技术细节) 章节。
 
-### 训练命令
+### 1. 训练命令
 
 在 **LlamaFactory 根目录**执行：
 
@@ -213,7 +213,7 @@ llamafactory-cli train projects/edge_news_summarizer/configs/train_qwen3_8b_qlor
 - **显存占用**：~6.6 GB（batch=1 + 梯度累积）
 - **Checkpoints**：每 50 步保存一次，保留最近 5 个
 
-### 合并 LoRA 权重（可选）
+### 2. 合并 LoRA 权重（可选）
 
 训练完成后，可将 LoRA adapter 合并回基座模型用于独立部署：
 
@@ -232,7 +232,7 @@ llamafactory-cli export \
 
 ## 推理与应用
 
-### 交互式 CLI
+### 1. 交互式 CLI
 
 ```bash
 # 仅微调模型
@@ -247,7 +247,7 @@ python projects/edge_news_summarizer/scripts/08_demo_cli.py \
   --compare
 ```
 
-### 批量对比推理
+### 2. 批量对比推理
 
 从测试集提取样本，生成基座/微调并排对比结果：
 
