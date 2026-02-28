@@ -1,6 +1,6 @@
 ### Model
-model_name_or_path: Qwen/Qwen2.5-3B-Instruct  # 基座模型路径
-adapter_name_or_path: projects/edge_news_summarizer/outputs/checkpoints/qwen25-3b-qlora-news  # LoRA adapter 路径
+model_name_or_path: D:/LLM/models/Qwen3-4B
+adapter_name_or_path: projects/edge_news_summarizer/outputs/checkpoints/qwen3-4b-qlora-news
 
 ### Method
 stage: sft
@@ -8,15 +8,18 @@ do_predict: true
 finetuning_type: lora
 
 ### Dataset
-dataset: news_structured_summary
-template: qwen
+eval_dataset: news_structured_summary_test
+template: qwen3_nothink
 cutoff_len: 1024
+
+### Qwen3 特有
+enable_thinking: false
 
 ### Output
 output_dir: projects/edge_news_summarizer/outputs/eval
-per_device_eval_batch_size: 2
+per_device_eval_batch_size: 1
 predict_with_generate: true
-fp16: true
+bf16: true
 
 ### Generation
 max_new_tokens: 512

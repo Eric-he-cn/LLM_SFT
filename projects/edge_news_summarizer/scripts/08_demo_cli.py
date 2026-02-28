@@ -6,24 +6,33 @@
 功能：
   - 交互式或批量模式
   - 支持基座模型 / 微调模型（自动加载 LoRA adapter）
+  - 支持 --compare 模式：同一输入同时跑基座模型（含系统提示词）和微调模型，逐条对比输出
   - 输入：新闻标题 + 正文（命令行交互 / txt / json 文件）
   - 输出：结构化摘要（终端显示 + 可选保存）
   - 显示推理耗时
 
-用法（交互模式）：
-  python scripts/08_demo_cli.py --model_path ./models/Qwen2.5-3B-Instruct
+用法（交互模式，仅基座模型）：
+  python scripts/08_demo_cli.py --model_path D:/LLM/models/Qwen3-4B
 
 用法（微调模型）：
   python scripts/08_demo_cli.py \
-    --model_path ./models/Qwen2.5-3B-Instruct \
-    --adapter_path ./outputs/checkpoints/qwen25-3b-qlora-news
+    --model_path D:/LLM/models/Qwen3-4B \
+    --adapter_path outputs/checkpoints/qwen3-4b-qlora-news
 
-用法（批量处理文件）：
+用法（对比模式：基座 vs 微调，交互式）：
   python scripts/08_demo_cli.py \
-    --model_path ./models/Qwen2.5-3B-Instruct \
+    --model_path D:/LLM/models/Qwen3-4B \
+    --adapter_path outputs/checkpoints/qwen3-4b-qlora-news \
+    --compare
+
+用法（对比模式：批量处理并保存对比结果）：
+  python scripts/08_demo_cli.py \
+    --model_path D:/LLM/models/Qwen3-4B \
+    --adapter_path outputs/checkpoints/qwen3-4b-qlora-news \
+    --compare \
     --input_file data/cleaned/test.json \
-    --output_file outputs/eval/demo_outputs.jsonl \
-    --num_samples 20
+    --output_file outputs/eval/compare_outputs.jsonl \
+    --num_samples 50
 """
 
 import argparse
@@ -262,12 +271,140 @@ def batch_mode(model, tokenizer, prompt_template: str, input_file: Path,
     print(f"\n[INFO] 批量处理完成！结果已保存: {output_file}")
 
 
+def print_compare(title: str, base_out: str, ft_out: str,
+                  base_elapsed: float, ft_elapsed: float) -> None:
+    """并排打印基座模型与微调模型的对比输出。"""
+    sep = "=" * 70
+    half = "-" * 70
+    print(f"\n{sep}")
+    print(f"新闻标题：{title[:80]}")
+    print(sep)
+    print(f"【基座模型（Base + 系统提示词）】  耗时: {base_elapsed:.3f}s")
+    print(half)
+    print(base_out if base_out else "(无输出)")
+    print(sep)
+    print(f"【微调模型（Fine-tuned + 系统提示词）】  耗时: {ft_elapsed:.3f}s")
+    print(half)
+    print(ft_out if ft_out else "(无输出)")
+    print(sep + "\n")
+
+
+def compare_batch_mode(base_model, base_tokenizer,
+                       ft_model, ft_tokenizer,
+                       prompt_template: str, input_file: Path,
+                       output_file: Path, num_samples: int,
+                       max_new_tokens: int) -> None:
+    """对比批量模式：同一输入分别跑基座和微调模型，输出对比结果。"""
+    with open(input_file, encoding="utf-8") as f:
+        if input_file.suffix == ".json":
+            data = json.load(f)
+            if not isinstance(data, list):
+                data = [data]
+        else:
+            data = [json.loads(line) for line in f if line.strip()]
+
+    if num_samples > 0:
+        data = data[:num_samples]
+
+    print(f"[INFO] 对比模式：处理 {len(data)} 条记录（基座 vs 微调）...")
+
+    with open(output_file, "w", encoding="utf-8") as out_f:
+        for i, record in enumerate(data, 1):
+            title = record.get("title", "")
+            content = record.get("content", record.get("input", ""))
+            if not title and "input" in record:
+                input_text = record["input"]
+                for line in input_text.split("\n"):
+                    if line.startswith("新闻标题："):
+                        title = line.replace("新闻标题：", "").strip()
+                content_start = input_text.find("新闻正文：")
+                if content_start >= 0:
+                    content = input_text[content_start + 5:].strip()
+            if not content:
+                continue
+
+            print(f"[{i:3d}/{len(data)}] 处理: {title[:50] or '(无标题)'}")
+
+            base_out, base_t = generate_summary(
+                base_model, base_tokenizer, title, content,
+                prompt_template, max_new_tokens)
+            ft_out, ft_t = generate_summary(
+                ft_model, ft_tokenizer, title, content,
+                prompt_template, max_new_tokens)
+
+            print_compare(title, base_out, ft_out, base_t, ft_t)
+
+            result = {
+                "id": record.get("id", f"compare_{i}"),
+                "title": title,
+                "reference": record.get("output", ""),
+                "base_prediction": base_out,
+                "ft_prediction": ft_out,
+                "base_elapsed_s": base_t,
+                "ft_elapsed_s": ft_t,
+            }
+            out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+            if i % 10 == 0:
+                out_f.flush()
+
+    print(f"\n[INFO] 对比完成！结果已保存: {output_file}")
+
+
+def compare_interactive_mode(base_model, base_tokenizer,
+                              ft_model, ft_tokenizer,
+                              prompt_template: str,
+                              max_new_tokens: int,
+                              save_path: Path | None) -> None:
+    """对比交互式模式。"""
+    print("===== 新闻摘要对比 Demo（Base vs Fine-tuned）=====")
+    print("输入 'quit' 退出\n")
+    results = []
+    while True:
+        title = input("请输入新闻标题（或 'quit' 退出）：").strip()
+        if title.lower() in ("quit", "exit", "q"):
+            break
+        print("请输入新闻正文（空行结束）：")
+        lines = []
+        while True:
+            line = input()
+            if not line:
+                break
+            lines.append(line)
+        content = "\n".join(lines).strip()
+        if not content:
+            print("[WARN] 正文为空，跳过。\n")
+            continue
+
+        print("\n[INFO] 生成基座模型输出...")
+        base_out, base_t = generate_summary(
+            base_model, base_tokenizer, title, content, prompt_template, max_new_tokens)
+        print("[INFO] 生成微调模型输出...")
+        ft_out, ft_t = generate_summary(
+            ft_model, ft_tokenizer, title, content, prompt_template, max_new_tokens)
+
+        print_compare(title, base_out, ft_out, base_t, ft_t)
+
+        result = {"title": title, "content": content[:500],
+                  "base_prediction": base_out, "ft_prediction": ft_out,
+                  "base_elapsed_s": base_t, "ft_elapsed_s": ft_t}
+        results.append(result)
+        if save_path:
+            with open(save_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+    print(f"\n共生成 {len(results)} 条对比结果。")
+    if save_path:
+        print(f"结果已保存: {save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="新闻结构化摘要 CLI Demo")
     parser.add_argument("--model_path", type=str, required=True,
-                        help="基座模型路径（本地目录或 HuggingFace 模型名）")
+                        help="模型路径（对比模式下同时作为基座模型和微调模型的基础）")
     parser.add_argument("--adapter_path", type=str, default=None,
-                        help="LoRA adapter 路径（可选）")
+                        help="LoRA adapter 路径（微调模型，对比模式必须提供）")
+    parser.add_argument("--compare", action="store_true",
+                        help="对比模式：同时运行基座模型（无adapter）和微调模型（有adapter），逐条对比输出")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--quantize", action="store_true", help="使用 4-bit 量化（需要 bitsandbytes）")
     parser.add_argument("--max_new_tokens", type=int, default=512)
@@ -284,21 +421,57 @@ def main():
 
     args = parser.parse_args()
 
+    prompt_template = load_prompt_template()
+
+    # ── 对比模式 ──────────────────────────────────────────────
+    if args.compare:
+        if not args.adapter_path:
+            print("[ERROR] --compare 模式需要同时提供 --adapter_path", file=sys.stderr)
+            import sys; sys.exit(1)
+
+        print("[INFO] 对比模式：加载基座模型（无 adapter）...")
+        base_model, base_tokenizer = load_model(
+            args.model_path, adapter_path=None,
+            device=args.device, quantize=args.quantize)
+
+        print("[INFO] 对比模式：加载微调模型（含 adapter）...")
+        ft_model, ft_tokenizer = load_model(
+            args.model_path, adapter_path=args.adapter_path,
+            device=args.device, quantize=args.quantize)
+
+        if args.input_file:
+            input_path = Path(args.input_file)
+            if not input_path.exists():
+                print(f"[ERROR] 输入文件不存在: {input_path}", file=sys.stderr)
+                import sys; sys.exit(1)
+            compare_batch_mode(
+                base_model, base_tokenizer,
+                ft_model, ft_tokenizer,
+                prompt_template, input_path,
+                Path(args.output_file), args.num_samples, args.max_new_tokens)
+        else:
+            compare_interactive_mode(
+                base_model, base_tokenizer,
+                ft_model, ft_tokenizer,
+                prompt_template, args.max_new_tokens,
+                Path(args.output_file) if args.output_file else None)
+        return
+
+    # ── 普通模式 ──────────────────────────────────────────────
     model, tokenizer = load_model(args.model_path, args.adapter_path,
                                   args.device, args.quantize)
-    prompt_template = load_prompt_template()
 
     if args.input_file:
         input_path = Path(args.input_file)
         if not input_path.exists():
             print(f"[ERROR] 输入文件不存在: {input_path}", file=sys.stderr)
-            sys.exit(1)
+            import sys; sys.exit(1)
         batch_mode(model, tokenizer, prompt_template, input_path,
                    Path(args.output_file), args.num_samples, args.max_new_tokens)
     else:
-        save_path = EVAL_DIR / "demo_outputs.jsonl" if args.output_file else None
         interactive_mode(model, tokenizer, prompt_template,
-                         args.max_new_tokens, Path(args.output_file) if args.output_file else None)
+                         args.max_new_tokens,
+                         Path(args.output_file) if args.output_file else None)
 
 
 if __name__ == "__main__":

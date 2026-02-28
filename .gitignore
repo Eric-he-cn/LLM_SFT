@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+# .vscode/  # 保留 VS Code workspace 配置（extensions、settings）
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temporary / scratch scripts
+_tmp_*
+*_tmp_*
+_check_*
+
+# Project-specific directories
+# (Large models, training outputs, raw data — typically too large for git)
+projects/edge_news_summarizer/outputs/
+projects/edge_news_summarizer/data/raw/
+projects/edge_news_summarizer/data/labeled/
+projects/edge_news_summarizer/data/cleaned/
+projects/edge_news_summarizer/data/reports/
+
+# OS files
+Thumbs.db
+.DS_Store
+*.log
+
+# Temp files
+*.tmp
+temp/
+tmp/
+
+# Cache
+.cache/
+*.cache
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints
+
+# Optional: LLaMA-Factory artifacts
+LLaMA-Factory/

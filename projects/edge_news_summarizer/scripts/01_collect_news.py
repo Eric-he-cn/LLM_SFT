@@ -10,18 +10,30 @@
   "title": "新闻标题",
   "content": "新闻正文",
   "source": "数据来源",
+  "lang": "语言标识（zh/en）",
   "date": "发布日期（可选）"
 }
 
+数据集方案：XL-Sum 中英混合
+  - 中文：csebuetnlp/xlsum, config=chinese_simplified（BBC中文，专业摘要）
+  - 英文：csebuetnlp/xlsum, config=english（BBC英文，专业摘要）
+  - 各取 max_samples//2 条，混合后统一由 API 生成中文结构化摘要
+
 用法：
+  # XL-Sum 中英混合（推荐，默认方案）
+  python scripts/01_collect_news.py --source xlsum --max_samples 5000
+
+  # 仅中文
+  python scripts/01_collect_news.py --source xlsum --lang zh --max_samples 5000
+
+  # 仅英文
+  python scripts/01_collect_news.py --source xlsum --lang en --max_samples 5000
+
   # 从本地 JSONL 导入
   python scripts/01_collect_news.py --source local --input path/to/news.jsonl
 
-  # 从 HuggingFace 导入（CNN/DailyMail）
-  python scripts/01_collect_news.py --source hf --dataset cnn_dailymail --split train --max_samples 5000
-
-  # 查看样本
-  python scripts/01_collect_news.py --source hf --dataset cnn_dailymail --split train --max_samples 100 --preview
+  # 预览样本（不保存）
+  python scripts/01_collect_news.py --source xlsum --max_samples 10 --preview
 """
 
 import argparse
@@ -41,6 +53,61 @@ SAMPLE_FILE = DATA_RAW_DIR / "sample_raw.jsonl"
 
 def make_id(prefix: str = "news") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+# ---- 中国/香港/台湾政治及社会运动过滤 ----
+# 包含以下关键词的中文或英文新闻将被排除，避免触发 API 审查且与摘要任务无关
+ZH_POLITICAL_KEYWORDS = [
+    # === 中国大陆政治领导 / 机构 ===
+    "习近平", "李克强", "李强", "王岐山", "赵乐际", "王沪宁", "王毅",
+    "政治局常委", "中共中央", "中央政治局", "中央纪委", "国家监委",
+    "十八大", "十九大", "二十大", "党代会", "党代表大会",
+    "全国人大", "全国政协", "人大常委",
+    # === 香港政治人物 / 机构 ===
+    "梁振英", "林郑月娥", "李家超", "特首", "行政长官",
+    "建制派", "泛民", "民主派", "民建联", "公民党",
+    "立法会", "施政报告", "国安法", "基本法第二十三条",
+    # === 香港政治抗议 / 社会运动 ===
+    "占领中环", "占中", "雨伞运动", "雨伞革命",
+    "反修例", "反国教", "港独", "罢课",
+    "示威学生", "示威者", "抗议学生",
+    # === 台湾政治 ===
+    "台独", "台湾独立", "太阳花", "民进党", "国民党",
+    "蔡英文", "韩国瑜", "柯文哲", "赖清德",
+    "总统大选", "立法委员选举", "台湾选举",
+    # === 新疆 / 西藏独立运动 ===
+    "藏独", "西藏独立", "疆独", "新疆独立", "东突",
+    # === 敏感历史事件 / 人物 ===
+    "天安门", "六四", "刘晓波", "艾未未", "法轮功",
+    "维权律师", "709大抓捕", "709案",
+    # === 政治迫害 / 异见 ===
+    "政治犯", "异见人士", "被失踪", "政治迫害", "一党专政",
+    # === 宗教政治 ===
+    "达赖喇嘛", "班禅喇嘛",
+    # === 中国社会运动 ===
+    "茉莉花革命", "劳工维权", "上访者", "维稳",
+    # === 领土主权争议 ===
+    "钓鱼岛", "南海仲裁", "九段线",
+]
+
+# 同步过滤英文文章中涉及中国政治核心词
+EN_POLITICAL_KEYWORDS = [
+    "tiananmen", "june 4", "falun gong", "falun dafa",
+    "uyghur detention", "xinjiang camp", "hong kong protest",
+    "umbrella revolution", "umbrella movement",
+    "taiwan independence", "tibet independence",
+    "xi jinping crackdown", "chinese dissident",
+    "709 crackdown", "liu xiaobo",
+]
+
+
+def is_political(title: str, content: str, lang: str) -> bool:
+    """判断新闻是否为政治敏感内容（中英文均检查）。"""
+    text_short = (title + content[:400]).lower() if lang == "en" else title + content[:400]
+    if lang == "zh":
+        return any(kw in text_short for kw in ZH_POLITICAL_KEYWORDS)
+    else:
+        return any(kw in text_short for kw in EN_POLITICAL_KEYWORDS)
 
 
 def collect_from_local(input_path: str, title_key: str, content_key: str,
@@ -91,77 +158,78 @@ def collect_from_local(input_path: str, title_key: str, content_key: str,
     return normalized
 
 
-def collect_from_hf(dataset_name: str, split: str, config: str,
-                    max_samples: int) -> list[dict]:
-    """从 HuggingFace 数据集收集新闻。"""
+def collect_from_xlsum(lang: str, max_samples: int) -> list[dict]:
+    """从 XL-Sum 数据集收集新闻（支持 zh/en）。
+
+    XL-Sum 字段：title, text, summary, url, id
+    lang: 'zh' -> chinese_simplified, 'en' -> english
+    """
     try:
         from datasets import load_dataset
     except ImportError:
         print("[ERROR] 请先安装 datasets: pip install datasets", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[INFO] 加载 HuggingFace 数据集: {dataset_name} (split={split}, config={config})")
-    kwargs = {}
-    if config:
-        kwargs["name"] = config
-    if max_samples:
-        kwargs["split"] = f"{split}[:{max_samples}]"
-    else:
-        kwargs["split"] = split
+    config_map = {"zh": "chinese_simplified", "en": "english"}
+    config = config_map.get(lang)
+    if not config:
+        print(f"[ERROR] 不支持的语言: {lang}，可选 zh / en", file=sys.stderr)
+        sys.exit(1)
 
-    ds = load_dataset(dataset_name, **kwargs, trust_remote_code=True)
+    split_str = f"train[:{max_samples}]" if max_samples else "train"
+    print(f"[INFO] 加载 XL-Sum ({config}, {split_str})")
+
+    # XL-Sum 使用旧版加载脚本，datasets 4.x 不兼容，改用 parquet 直接加载
+    HF_BASE = "hf://datasets/csebuetnlp/xlsum@refs/convert/parquet"
+    data_files = {
+        "train": f"{HF_BASE}/{config}/train/*.parquet",
+        "validation": f"{HF_BASE}/{config}/validation/*.parquet",
+        "test": f"{HF_BASE}/{config}/test/*.parquet",
+    }
+    ds = load_dataset("parquet", data_files=data_files, split=split_str)
+    print(f"[INFO] 加载完成，共 {len(ds)} 条，字段: {ds.column_names}")
 
     records = []
-    # 自动探测字段名
-    col_names = ds.column_names
-    print(f"[INFO] 数据集字段: {col_names}")
-
-    # CNN/DailyMail 字段映射
-    if "article" in col_names and "highlights" in col_names:
-        for i, row in enumerate(ds):
-            records.append({
-                "id": make_id("hf"),
-                "title": row.get("id", f"article_{i}"),  # CNN/DM 没有标题，用 id 代替
-                "content": row["article"].strip(),
-                "source": dataset_name,
-                "date": "",
-            })
-    elif "title" in col_names and "text" in col_names:
-        for row in ds:
-            records.append({
-                "id": make_id("hf"),
-                "title": row["title"].strip(),
-                "content": row["text"].strip(),
-                "source": dataset_name,
-                "date": row.get("date", ""),
-            })
-    elif "title" in col_names and "content" in col_names:
-        for row in ds:
-            records.append({
-                "id": make_id("hf"),
-                "title": row["title"].strip(),
-                "content": row["content"].strip(),
-                "source": dataset_name,
-                "date": row.get("date", row.get("publish_date", "")),
-            })
-    else:
-        # 通用兜底：取前两个文本字段
-        text_cols = [c for c in col_names if isinstance(ds[0].get(c), str)]
-        if len(text_cols) < 1:
-            print("[ERROR] 无法自动映射数据集字段，请修改脚本手动指定。", file=sys.stderr)
-            sys.exit(1)
-        title_col = text_cols[0]
-        content_col = text_cols[1] if len(text_cols) > 1 else text_cols[0]
-        for row in ds:
-            records.append({
-                "id": make_id("hf"),
-                "title": row[title_col].strip(),
-                "content": row[content_col].strip(),
-                "source": dataset_name,
-                "date": "",
-            })
-
+    skipped_political = 0
+    for row in ds:
+        title = (row.get("title") or "").strip()
+        content = (row.get("text") or "").strip()
+        if not content:
+            continue
+        # 过滤政治新闻（中英文均检查）
+        if is_political(title, content, lang):
+            skipped_political += 1
+            continue
+        records.append({
+            "id": make_id(f"xlsum_{lang}"),
+            "title": title,
+            "content": content,
+            "source": f"xlsum_{lang}",
+            "lang": lang,
+            "date": "",
+        })
+    if skipped_political:
+        print(f"[INFO] 已过滤中文政治新闻: {skipped_political} 条")
     return records
+
+
+def collect_from_xlsum_mixed(max_samples: int) -> list[dict]:
+    """从 XL-Sum 收集中英混合数据，各取 max_samples//2 条。"""
+    half = max_samples // 2
+    zh_records = collect_from_xlsum("zh", half)
+    en_records = collect_from_xlsum("en", half)
+
+    # 交错混合（中英交替），避免批次偏斜
+    mixed = []
+    for zh, en in zip(zh_records, en_records):
+        mixed.append(zh)
+        mixed.append(en)
+    # 补齐奇数余量
+    for r in zh_records[len(en_records):] + en_records[len(zh_records):]:
+        mixed.append(r)
+
+    print(f"[INFO] 混合完成：中文 {len(zh_records)} 条 + 英文 {len(en_records)} 条 = {len(mixed)} 条")
+    return mixed
 
 
 def filter_records(records: list[dict], min_content_len: int = 100,
@@ -202,20 +270,17 @@ def save_sample(records: list[dict], sample_count: int = 20) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="新闻数据收集脚本")
-    parser.add_argument("--source", choices=["local", "hf"], required=True,
-                        help="数据来源：local（本地文件）或 hf（HuggingFace）")
+    parser = argparse.ArgumentParser(description="新闻数据收集脚本（XL-Sum 中英混合方案）")
+    parser.add_argument("--source", choices=["xlsum", "local"], default="xlsum",
+                        help="数据来源：xlsum（XL-Sum，默认）或 local（本地文件）")
+    parser.add_argument("--lang", choices=["zh", "en", "mixed"], default="mixed",
+                        help="xlsum 语言：zh / en / mixed（默认 mixed，中英各半）")
 
     # 本地文件参数
     parser.add_argument("--input", type=str, help="本地 JSONL/JSON 文件路径（source=local 时必填）")
     parser.add_argument("--title_key", default="title", help="标题字段名（默认: title）")
     parser.add_argument("--content_key", default="content", help="正文字段名（默认: content）")
     parser.add_argument("--date_key", default="date", help="日期字段名（默认: date）")
-
-    # HuggingFace 参数
-    parser.add_argument("--dataset", default="cnn_dailymail", help="HuggingFace 数据集名（默认: cnn_dailymail）")
-    parser.add_argument("--config", default="3.0.0", help="数据集配置名（CNN/DM 需要 3.0.0）")
-    parser.add_argument("--split", default="train", help="数据集分割（默认: train）")
 
     # 通用参数
     parser.add_argument("--max_samples", type=int, default=5000, help="最大样本数（默认: 5000）")
@@ -226,7 +291,6 @@ def main():
     parser.add_argument("--no_sample", action="store_true", help="不生成 sample_raw.jsonl")
 
     args = parser.parse_args()
-
     output_path = Path(args.output) if args.output else OUTPUT_FILE
 
     # 收集数据
@@ -235,8 +299,11 @@ def main():
             parser.error("--source local 时必须指定 --input 参数")
         records = collect_from_local(args.input, args.title_key, args.content_key,
                                      args.date_key, args.max_samples)
-    else:
-        records = collect_from_hf(args.dataset, args.split, args.config, args.max_samples)
+    else:  # xlsum
+        if args.lang == "mixed":
+            records = collect_from_xlsum_mixed(args.max_samples)
+        else:
+            records = collect_from_xlsum(args.lang, args.max_samples)
 
     print(f"[INFO] 收集原始记录: {len(records)} 条")
 
@@ -247,6 +314,12 @@ def main():
     if not records:
         print("[ERROR] 过滤后没有任何数据，请检查参数。", file=sys.stderr)
         sys.exit(1)
+
+    # 统计语言分布
+    zh_count = sum(1 for r in records if r.get("lang") == "zh")
+    en_count = sum(1 for r in records if r.get("lang") == "en")
+    if zh_count or en_count:
+        print(f"[INFO] 语言分布：中文 {zh_count} 条 / 英文 {en_count} 条")
 
     # 保存
     save_records(records, output_path, preview=args.preview)
