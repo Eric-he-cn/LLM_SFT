@@ -17,7 +17,7 @@ enable_thinking: false
 
 ### Output
 output_dir: projects/edge_news_summarizer/outputs/eval
-per_device_eval_batch_size: 1
+per_device_eval_batch_size: 4
 predict_with_generate: true
 bf16: true
 
