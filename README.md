@@ -1,4 +1,4 @@
-# 基于QLoRA的新闻结构化摘要助手（微调Qwen3-4B）
+# 基于SFT的新闻结构化摘要助手（QLoRA微调Qwen3-4B）
 
 基于 **Qwen3 + LLaMA-Factory** 的参数高效微调（PEFT）流水线，面向消费级 GPU 的结构化新闻摘要生成。
 
