@@ -47,11 +47,11 @@ _check_*
 
 # Project-specific directories
 # (Large models, training outputs, raw data — typically too large for git)
-projects/edge_news_summarizer/outputs/
-projects/edge_news_summarizer/data/raw/
-projects/edge_news_summarizer/data/labeled/
-projects/edge_news_summarizer/data/cleaned/
-projects/edge_news_summarizer/data/reports/
+outputs/
+data/raw/
+data/labeled/
+data/cleaned/
+data/reports/
 
 # OS files
 Thumbs.db
@@ -73,3 +73,4 @@ tmp/
 
 # Optional: LLaMA-Factory artifacts
 LLaMA-Factory/
+

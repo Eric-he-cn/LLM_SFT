@@ -136,7 +136,7 @@ template: qwen  # 必须一致！
 
 ```bash
 cd /path/to/LlamaFactory
-python projects/edge_news_summarizer/scripts/05_register_dataset_info.py
+python scripts/05_register_dataset_info.py
 ```
 
 然后验证 `data/dataset_info.json` 中是否有 `news_structured_summary` 条目。
@@ -230,3 +230,4 @@ llamafactory-cli export \
   --export_size 4 \
   --export_device cpu
 ```
+

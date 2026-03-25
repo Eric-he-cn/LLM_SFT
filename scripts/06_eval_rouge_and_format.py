@@ -32,7 +32,7 @@ EVAL_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_TEST = PROJECT_DIR / "data" / "cleaned" / "test.json"
 DEFAULT_PREDICTIONS = Path(
-    "D:/LLM/LlamaFactory/projects/edge_news_summarizer/outputs/eval/generated_predictions.jsonl"
+    "D:/LLM/LlamaFactory/outputs/eval/generated_predictions.jsonl"
 )
 DEFAULT_BASE_MODEL = "D:/LLM/models/Qwen3-4B"
 DEFAULT_ADAPTER_PATH = str(PROJECT_DIR / "outputs" / "checkpoints" / "qwen3-4b-qlora-news-v2")
@@ -742,3 +742,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

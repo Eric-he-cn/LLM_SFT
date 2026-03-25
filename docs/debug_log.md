@@ -123,11 +123,11 @@ with open(checkpoint_path, "a", encoding="utf-8") as f:
 **最终配置**：
 
 ```bash
-python -u projects/edge_news_summarizer/scripts/06_eval_rouge_and_format.py \
+python -u scripts/06_eval_rouge_and_format.py \
   --mode benchmark \
   --n_samples 0 \
   --batch_size 4 \
-  --merged_model projects/edge_news_summarizer/outputs/merged/qwen3-4b-news-v2 \
+  --merged_model outputs/merged/qwen3-4b-news-v2 \
   --only_groups C
 ```
 
@@ -169,7 +169,7 @@ C:\Users\<user>\miniconda3\envs\my_sft\Scripts\llamafactory-cli.exe train ...
 ```bash
 # 设置镜像加速（国内网络）
 $env:HF_ENDPOINT = "https://hf-mirror.com"
-python projects/edge_news_summarizer/scripts/01_collect_news.py ...
+python scripts/01_collect_news.py ...
 ```
 
 或在代码开头添加：
@@ -296,3 +296,4 @@ $env:PYTHONUTF8 = "1"
 ```
 
 更多通用环境问题见 [troubleshooting.md](troubleshooting.md)。
+

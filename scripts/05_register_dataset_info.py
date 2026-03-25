@@ -10,7 +10,7 @@
 
 用法：
   # 在 LlamaFactory 根目录下执行
-  python projects/edge_news_summarizer/scripts/05_register_dataset_info.py
+  python scripts/05_register_dataset_info.py
 
   # 或指定 LlamaFactory 根目录
   python scripts/05_register_dataset_info.py --llamafactory_root /path/to/LlamaFactory
@@ -38,7 +38,7 @@ def find_llamafactory_root(start: Path) -> Path | None:
 
 DATASET_ENTRIES = {
     "news_structured_summary": {
-        "file_name": "projects/edge_news_summarizer/data/cleaned/train.json",
+        "file_name": "data/cleaned/train.json",
         "formatting": "alpaca",
         "columns": {
             "prompt": "instruction",
@@ -47,7 +47,7 @@ DATASET_ENTRIES = {
         },
     },
     "news_structured_summary_val": {
-        "file_name": "projects/edge_news_summarizer/data/cleaned/val.json",
+        "file_name": "data/cleaned/val.json",
         "formatting": "alpaca",
         "columns": {
             "prompt": "instruction",
@@ -56,7 +56,7 @@ DATASET_ENTRIES = {
         },
     },
     "news_structured_summary_test": {
-        "file_name": "projects/edge_news_summarizer/data/cleaned/test.json",
+        "file_name": "data/cleaned/test.json",
         "formatting": "alpaca",
         "columns": {
             "prompt": "instruction",
@@ -144,3 +144,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
