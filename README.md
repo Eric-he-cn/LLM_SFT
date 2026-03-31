@@ -1,6 +1,6 @@
-# 基于SFT的新闻结构化摘要助手（QLoRA微调Qwen3-4B）
+# 面向端侧信息流场景的结构化摘要助手（Qwen3-4B + QLoRA SFT + AWQ）
 
-基于 **Qwen3 + LLaMA-Factory** 的参数高效微调（PEFT）流水线，面向消费级 GPU 的结构化新闻摘要生成。
+基于 **Qwen3-4B + LLaMA-Factory** 的端到端结构化摘要工程，面向 16GB 显存级别硬件，覆盖从数据构建、SFT 微调、AWQ 后训练量化到端侧推理评测的完整闭环。
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
@@ -10,144 +10,168 @@
 
 ## 目录
 
-- [1. 项目概述](#1-项目概述)
-- [2. 项目结构](#2-项目结构)
-- [3. 快速开始](#3-快速开始)
-- [4. 端到端流程](#4-端到端流程)
-- [5. 评测方法](#5-评测方法)
-- [6. 实验结果](#6-实验结果)
-- [7. 技术细节](#7-技术细节)
-- [8. 常见问题](#8-常见问题)
-- [9. 参考文献](#9-参考文献)
+- [1. 项目摘要](#1-项目摘要)
+- [2. 背景、目标与贡献](#2-背景目标与贡献)
+- [3. 系统架构与项目结构](#3-系统架构与项目结构)
+- [4. 环境与依赖](#4-环境与依赖)
+- [5. 方法与实现](#5-方法与实现)
+- [6. 实验设置与评测口径](#6-实验设置与评测口径)
+- [7. 实验结果与分析](#7-实验结果与分析)
+- [8. 复现流程与命令清单](#8-复现流程与命令清单)
+- [9. 工程建议与排障](#9-工程建议与排障)
+- [10. 参考文献](#10-参考文献)
 
 ---
 
-## 1. 项目概述
+## 1. 项目摘要
 
-本项目实现了一个**端到端的新闻结构化摘要微调系统**，通过 QLoRA（Quantized Low-Rank Adaptation）技术在消费级 GPU 上高效训练大语言模型，使其能够将新闻文本转化为固定 6 字段格式的结构化摘要，适用于客户终端、边缘设备的信息流展示。
+本项目围绕“端侧信息流结构化摘要”这一落地场景，解决三个核心矛盾：
+- 质量矛盾：基座模型在新闻摘要上的关键信息覆盖率不足。
+- 结构矛盾：自由生成容易偏离固定 6 字段协议，导致前端渲染和后处理复杂。
+- 部署矛盾：完整 BF16 模型体积大、延迟高，在端侧资源预算下难以稳定上线。
 
-**核心技术栈**：
-- **基座模型**：Qwen3-4B / Qwen3-8B
-- **微调框架**：LLaMA-Factory（支持 QLoRA、4-bit NF4 量化）
-- **数据来源**：XL-Sum 多语言新闻数据集
-- **标注方案**：DeepSeek API
+为此，项目采用“两条主线并行收敛”的策略：
+- **SFT 主线（能力构建）**：通过 QLoRA SFT 学习结构化任务协议，显著提升 ROUGE 与格式稳定性。
+- **量化主线（部署压缩）**：在 SFT merged 模型上执行 AutoAWQ（W4A16）后训练量化，并统一在 vLLM 口径下完成质量/性能评估。
 
-**输出格式示例**：
-```
-【一句话摘要】事件核心描述
-【核心要点】1. ... 2. ... 3. ...
-【事件类别】科技/财经/社会/国际/...
-【主要主体】相关组织或个人
-【时间信息】事件发生时间
-【潜在影响】对行业、市场、社会的影响分析
-```
+最终方案不是“只做 SFT”或“只做量化”，而是：
+- 先由 SFT 保证任务能力与结构约束。
+- 再由 AWQ 压缩体积并降低时延，达到可部署状态。
 
 ---
 
-### 1.1 核心特性
+## 2. 背景、目标与贡献
 
-- **固定字段结构化输出**：固定格式输出，零后处理直接适配 UI 渲染
-- **QLoRA 参数高效微调**：4-bit 量化 + LoRA 低秩适配，消费级显卡 16GB 显存可训练
-- **异步数据标注流水线**：DeepSeek API 异步并发打标（5 并发 ~50 条/分钟），成本 <￥15/1000 条
-- **多维度评测体系**：ROUGE-L、格式合规率、推理延迟三维评测
-- **基座/微调对比工具**：内置并排对比模式，量化微调收益
+### 2.1 场景定义
 
----
-
-### 1.2 系统要求
-
-| 组件 | 规格要求 |
-|------|---------|
-| **GPU** | NVIDIA RTX 3090 / 4090 / 5060 Ti 及以上（≥16GB 显存） |
-| **CUDA** | 12.8+ |
-| **Python** | 3.11 |
-| **磁盘空间** | ~30GB（模型 + 数据集 + checkpoints） |
-
----
-
-## 2. 项目结构
+目标任务是将输入新闻文本转换为固定 6 字段结构化摘要，输出协议如下：
 
 ```
+【一句话摘要】
+【核心要点】
+【事件类别】
+【主要主体】
+【时间信息】
+【潜在影响】
+```
+
+该协议具有两个工程价值：
+- 可直接映射到信息流卡片组件，减少业务后处理逻辑。
+- 可用规则校验字段完整率、类别合法性、要点格式等，便于建立可量化的质量门槛。
+
+### 2.2 项目目标
+
+在固定协议下完成以下目标：
+1. 提升摘要语义质量（ROUGE 指标）。
+2. 提升格式稳定性（字段完整率、类别合规率、要点格式率）。
+3. 在质量可接受损失内，将模型压缩到端侧可部署体积并显著降低延迟。
+
+### 2.3 主要贡献
+
+1. 完成 `XL-Sum -> DeepSeek 标注 -> 清洗校验 -> QLoRA SFT` 的端到端数据与训练链路。
+2. 形成可复用的 AWQ 量化链路（校准集准备、量化、冒烟、全量评测）。
+3. 建立统一评测口径（质量 + 性能），并提供 checkpoint 续跑与对照结果追溯。
+4. 完成量化参数探索并收敛到最终推荐配置，明确“可部署方案”与“未采用方案”的边界。
+
+---
+
+## 3. 系统架构与项目结构
+
+### 3.1 端到端流程架构
+
+```text
+数据源(XL-Sum)
+   -> 01 采集与过滤
+   -> 02 DeepSeek 标注
+   -> 03 校验清洗
+   -> 04 划分 train/val/test
+   -> 05 注册 LLaMA-Factory
+   -> QLoRA SFT 训练与合并
+   -> 06 SFT 质量评测
+   -> 09/10 AWQ 校准与量化
+   -> 13 AWQ 冒烟
+   -> 14 全量质量对比（vLLM）
+   -> 07 性能对比（vLLM）
+```
+
+### 3.2 仓库结构（按主/备选流程标注）
+
+```text
 Qwen3-QLoRA-News/
-├── README.md                              # 项目主文档（含实验结果与使用指南）
-├── requirements.txt                       # Python 依赖清单（精确版本号）
-├── .gitignore                             # 排除大文件：outputs/、data/raw/ 等
-│
-└── 
-    │
-    ├── configs/                           # LLaMA-Factory YAML 配置文件
-    │   ├── train_qwen3_4b_qlora_news.yaml # Qwen3-4B QLoRA 训练配置（已验证）
-    │   ├── train_qwen3_8b_qlora_news.yaml # Qwen3-8B QLoRA 训练配置（备用）
-    │   ├── infer_news.yaml                # 微调模型批量推理配置（batch=4）
-    │   └── infer_news_base.yaml           # 基座模型批量推理配置（max_new_tokens=2048）
-    │
-    ├── data/                              # 数据流水线（大文件已 .gitignore）
-    │   ├── raw/                           # 原始 XL-Sum 采集数据（未处理）
-    │   ├── labeled/                       # DeepSeek API 标注中间产物
-    │   ├── cleaned/                       # 最终可用数据集
-    │   │   ├── train.json                 # 训练集（3,843 条）
-    │   │   ├── val.json                   # 验证集（480 条）
-    │   │   └── test.json                  # 测试集（481 条）
-    │   ├── prompts/
-    │   │   └── label_prompt_news_structured.txt  # DeepSeek 标注 prompt 模板
-    │   └── reports/                       # 数据质量检查报告（JSON）
-    │
-    ├── scripts/                           # 自动化流水线脚本
-    │   ├── 01_collect_news.py             # 从 XL-Sum 采集原始新闻数据
-    │   ├── 02_generate_labels_api.py      # 调用 DeepSeek API 批量生成结构化标签
-    │   ├── 03_validate_and_clean.py       # 格式校验、去重、质量快照统计（整合临时质量脚本）
-    │   ├── 04_split_dataset.py            # 切分数据集 + instruction 统一刷新 + token 长度统计
-    │   ├── 05_register_dataset_info.py    # 向 LLaMA-Factory dataset_info.json 注册数据集
-    │   ├── 06_eval_rouge_and_format.py    # 在线 benchmark + 离线评测（Base/SFT 独立加载）
-    │   ├── 07_benchmark_latency.py        # 单条推理延迟基准测试
-    │   └── 08_demo_cli.py                 # 交互/批量/对比演示（支持 thinking 开关）
-    │
-    ├── outputs/                           # 训练与评测产物（已 .gitignore）
-    │   ├── checkpoints/
-    │   │   └── qwen3-4b-qlora-news-v2/    # LoRA adapter 权重（63 MB，合并前）
-    │   ├── merged/
-    │   │   └── qwen3-4b-news-v2/          # 合并后完整模型权重（~8 GB）
-    │   ├── eval/                          # Benchmark 评测结果
-    │   │   ├── group_A/                   # Base 模型推理结果（481 条）
-    │   │   │   ├── predictions_raw.jsonl
-    │   │   │   ├── rouge_report.json      # R-1=0.6644, R-2=0.4211
-    │   │   │   ├── format_report.json     # 50 bad cases（类别越界为主）
-    │   │   │   └── bad_cases.jsonl
-    │   │   ├── group_B/                   # Base + thinking 推理结果（481 条）
-    │   │   ├── group_C/                   # SFT V2 推理结果（481 条）
-    │   │   │   ├── predictions_raw.jsonl
-    │   │   │   ├── rouge_report.json      # R-1=0.7653, R-2=0.5232
-    │   │   │   ├── format_report.json     # 0 bad cases，全部指标 100%
-    │   │   │   └── bad_cases.jsonl
-    │   │   ├── benchmark_summary.json     # A/B/C 汇总指标
-    │   │   └── analysis_report.json       # 多组对比分析报告
-    │   └── logs/                          # 训练日志（trainer_log.jsonl）
-    │
-    └── docs/                              # 开发文档
-        ├── dev_plan.md                    # 项目开发计划与阶段拆解
-        ├── labeling_guideline.md          # 标注规范：6 字段格式定义与示例
-        └── troubleshooting.md             # 常见问题排查记录
+├── README.md
+├── requirements.txt
+├── configs/
+│   ├── train_qwen3_4b_qlora_news.yaml
+│   ├── train_qwen3_8b_qlora_news.yaml
+│   ├── infer_news.yaml
+│   └── infer_news_base.yaml
+├── data/
+│   ├── raw/
+│   ├── labeled/
+│   ├── cleaned/
+│   └── prompts/
+├── scripts/
+│   ├── 01_collect_news.py
+│   ├── 02_generate_labels_api.py
+│   ├── 03_validate_and_clean.py
+│   ├── 04_split_dataset.py
+│   ├── 05_register_dataset_info.py
+│   ├── 06_eval_rouge_and_format.py
+│   ├── 07_benchmark_latency.py
+│   ├── 08_demo_cli.py
+│   ├── 09_prepare_awq_calib.py
+│   ├── 10_quantize_awq.py
+│   ├── 11_awq_smoke_infer.py
+│   ├── 12_benchmark_quality_awq.py
+│   ├── 13_vllm_awq_smoke_infer.py
+│   ├── 14_benchmark_quality_vllm.py
+│   ├── awq_prepare_calib.py
+│   ├── quantize_awq.py
+│   ├── awq_smoke_infer.py
+│   └── experimental/
+│       ├── 15_build_awq_baseline_manifest.py
+│       └── 16_awq_recovery_compare.py
+├── docs/
+│   ├── dev_plan.md
+│   ├── awq_experiment_commands.md
+│   ├── awq_dvawq_backlog.md
+│   └── troubleshooting.md
+└── outputs/
 ```
+
+流程定位说明：
+- **主流程（AWQ）**：`09 -> 10 -> 13 -> 14 -> 07(vllm)`。
+- **备选流程（AutoAWQ推理）**：`11 -> 12`，仅在 vLLM 不可用或排障时使用。
+- **演示工具**：`08_demo_cli.py`，用于交互体验和基座/SFT 快速对比。
 
 ---
 
-## 3. 快速开始
+## 4. 环境与依赖
 
-### 3.1 环境配置
+### 4.1 双环境分工（推荐）
+
+| 环境 | 角色 | 典型脚本 |
+|------|------|----------|
+| `my_sft`（Windows） | 数据处理、SFT 训练、AutoAWQ 量化 | `01-06, 09-12` |
+| `wsl_vllm`（WSL/Linux） | vLLM 推理与性能压测主链 | `13, 14, 07 --backend vllm` |
+
+这样分工的原因：
+- 训练与量化依赖偏向 PyTorch/Transformers 组合。
+- vLLM 在 Linux/WSL 侧兼容性与性能更稳定。
+- 避免单环境混装导致的包冲突与调试成本。
+
+### 4.2 训练与量化环境（`my_sft`）
 
 ```bash
-# 创建 conda 环境
 conda create -n my_sft python=3.11 -y
 conda activate my_sft
 
-# 安装 PyTorch（以CUDA 12.8为例）
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-
-# 验证 GPU 可用性
-python -c "import torch; print('CUDA Available:', torch.cuda.is_available())"
+pip install -U datasets pandas tqdm pydantic python-dotenv openai \
+               rouge-score jieba bitsandbytes pyyaml jsonlines autoawq
 ```
 
-### 3.2 安装 LLaMA-Factory
+### 4.3 LLaMA-Factory 安装
 
 ```bash
 git clone --depth 1 https://github.com/hiyouga/LlamaFactory.git
@@ -155,141 +179,134 @@ cd LlamaFactory
 pip install -e ".[torch,metrics]"
 ```
 
-### 3.3 安装项目依赖
-
-```bash
-pip install -U datasets pandas tqdm pydantic python-dotenv openai \
-               rouge-score jieba bitsandbytes pyyaml jsonlines
-```
-
-### 3.4 配置 API 凭据（以deepseek为例）
+### 4.4 API 与模型准备
 
 ```bash
 cp .env.example .env
-# 编辑 .env 填入：
-# OPENAI_API_KEY=sk-xxxx          # DeepSeek API Key
-# OPENAI_API_BASE=https://api.deepseek.com  
-# OPENAI_MODEL=deepseek-chat  
+# OPENAI_API_KEY=...
+# OPENAI_API_BASE=https://api.deepseek.com
+# OPENAI_MODEL=deepseek-chat
 ```
-
-### 3.5 下载基座模型
 
 ```python
 from huggingface_hub import snapshot_download
-
-# Qwen3-4B
 snapshot_download("Qwen/Qwen3-4B", local_dir=r"D:\LLM\models\Qwen3-4B")
-
-# Qwen3-8B
-snapshot_download("Qwen/Qwen3-8B", local_dir=r"D:\LLM\models\Qwen3-8B")
 ```
+
+### 4.5 WSL vLLM 环境说明
+
+`wsl_vllm` 环境用于 13/14/07 的主评测链路。若首次使用 WSL，请先确保：
+- Windows WSL 已升级到最新版本。
+- `nvidia-smi` 在 WSL 内可见 GPU。
+- vLLM 可正常加载 BF16 与 AWQ 模型。
 
 ---
 
-## 4. 端到端流程
+## 5. 方法与实现
 
-### 4.1 数据构建流程
+### 5.1 数据构建链路（01 -> 05）
 
-构建高质量训练数据分为 5 个步骤，每个步骤对应一个独立脚本。所有脚本可在项目任意目录执行，路径已自动处理。
-
-#### 4.1.1 Step 1: 原始数据采集
-
-从 XL-Sum 数据集（BBC 多语言新闻）采集中英文混合数据，过滤涉政内容。
+#### 5.1.1 Step 1：数据采集（01）
 
 ```bash
-python scripts/01_collect_news.py \
-  --source xlsum --lang mixed --max_samples 6000
+python scripts/01_collect_news.py --source xlsum --lang mixed --max_samples 6000
 ```
 
-**输出**：`data/raw/news_raw.jsonl` (过滤后约4,800 条记录)
+目标与输出：
+- 从 XL-Sum 采集新闻样本。
+- 过滤不适配业务场景的内容。
+- 生成 `data/raw/news_raw.jsonl`。
 
-#### 4.1.2 Step 2: 结构化标注
-
-使用 DeepSeek API 异步生成六字段结构化标签。
+#### 5.1.2 Step 2：结构化标注（02）
 
 ```bash
-python scripts/02_generate_labels_api.py \
-  --max_samples 0 --concurrency 5
+python scripts/02_generate_labels_api.py --max_samples 0 --concurrency 5
 ```
 
-**输出**：`data/labeled/news_labeled_v1.jsonl` 
+标注模板约束模型输出为 6 字段格式，生成 `data/labeled/news_labeled_v1.jsonl`。
 
-#### 4.1.3 Step 3: 校验与清洗
-
-校验字段完整性、去重、检查格式合规性。
+#### 5.1.3 Step 3：校验与清洗（03）
 
 ```bash
 python scripts/03_validate_and_clean.py
+```
 
-# 可选：输出质量快照与随机样本预览
+可选增强：
+
+```bash
 python scripts/03_validate_and_clean.py \
   --sample_preview_count 5 \
   --quality_snapshot_path data/reports/quality_snapshot.json
 ```
 
-**输出**：`data/cleaned/cleaned_all.jsonl`, `data/reports/data_quality_report.md`, `data/reports/quality_snapshot.json`
+主要检查项：
+- 字段完整性。
+- 类别白名单合法性。
+- 核心要点编号格式。
+- 重复样本和明显异常文本。
 
-#### 4.1.4 Step 4: 数据集划分
-
-按 8:1:1 划分训练集/验证集/测试集。
+#### 5.1.4 Step 4：数据集划分（04）
 
 ```bash
-python scripts/04_split_dataset.py \
-  --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1
+python scripts/04_split_dataset.py --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1
+```
 
-# 可选：统一 instruction + 统计 token 长度分布
+可选：刷新 instruction 与 token 长度统计。
+
+```bash
 python scripts/04_split_dataset.py \
   --refresh_instruction \
   --analyze_tokens \
   --tokenizer_path D:/LLM/models/Qwen3-4B
 ```
 
-**输出**：`train.json` (3,843) / `val.json` (480) / `test.json` (481) / `test_manual_eval.json` (100) / `data/reports/token_length_report.json`（可选）
+最终规模：
+- `train.json = 3843`
+- `val.json = 480`
+- `test.json = 481`
 
-#### 4.1.5 Step 5: 注册到 LLaMA-Factory
-
-将数据集注册到 LLaMA-Factory 的配置文件。
+#### 5.1.5 Step 5：注册数据集（05）
 
 ```bash
-# 在 LlamaFactory 根目录执行
 python scripts/05_register_dataset_info.py
 ```
 
-**输出**：数据集 `news_structured_summary` 已注册至 `LlamaFactory/data/dataset_info.json`
+用于把训练数据注册到 LLaMA-Factory 的 `dataset_info.json`。
 
-**数据流示意**：
-```
-XL-Sum (BBC) → 筛选+内容过滤 → DeepSeek API → 校验清洗 → 数据划分 → Alpaca 格式
-  ~200k           ~4,800      ~4,800        ~4,804  3,843/480/481   train.json
-```
+---
 
-### 4.2 模型训练
+### 5.2 SFT 主线（能力构建）
 
-本项目采用 **QLoRA（Quantized Low-Rank Adaptation）** 微调方法，在 16GB 显存上高效训练 4B/8B 模型。技术细节见 [Technical Details](#技术细节) 章节。
+#### 5.2.1 训练策略
 
-#### 4.2.1 训练命令
+SFT 采用 QLoRA 进行参数高效微调：
+- 基座：Qwen3-4B
+- 量化：4-bit NF4
+- LoRA：rank=8, alpha=16
+- 梯度累积：16（在有限显存下模拟更大 batch）
 
-在 **LlamaFactory 根目录**执行：
+这种配置的目标是：
+- 降低训练显存占用。
+- 保持结构化任务学习能力。
+- 在 16GB 显存下实现可训练性。
+
+#### 5.2.2 训练命令
+
+在 LLaMA-Factory 根目录执行：
 
 ```bash
 conda activate my_sft
 
-# Qwen3-4B（推荐先验证，训练约 3~4 小时）
 llamafactory-cli train configs/train_qwen3_4b_qlora_news.yaml
-
-# Qwen3-8B（生产级质量，需调整配置）
-llamafactory-cli train configs/train_qwen3_8b_qlora_news.yaml
+# 备用：llamafactory-cli train configs/train_qwen3_8b_qlora_news.yaml
 ```
 
-**训练信息**（4B 模型，RTX 5060 Ti 16GB）：
-- **总步数**：651 步（3 epochs × 217 steps/epoch）
-- **训练时长**：~3.4 小时（包含评估与保存开销）
-- **显存占用**：建议以训练时 `nvidia-smi` 实测为准（受 `cutoff_len`、`grad_accum` 等参数影响）
-- **Checkpoints**：每 50 步保存一次，保留最近 5 个
+历史训练信息（4B）：
+- 训练步数：651（3 epochs）
+- 耗时：约 3.4 小时
+- 检查点策略：每 50 step 保存，保留最近 5 个
 
-#### 4.2.2 合并 LoRA 权重（可选）
-
-训练完成后，可将 LoRA adapter 合并回基座模型用于独立部署：
+#### 5.2.3 合并 LoRA 权重
 
 ```bash
 llamafactory-cli export \
@@ -300,281 +317,448 @@ llamafactory-cli export \
   --export_dir outputs/merged/qwen3-4b-news-v2
 ```
 
+输出 `outputs/merged/qwen3-4b-news-v2` 作为：
+- SFT 对照评测模型。
+- AWQ 量化输入模型。
 
-
-### 4.3 推理与应用
-
-#### 4.3.1 交互式 CLI
+#### 5.2.4 SFT 推理与对比演示（08）
 
 ```bash
-# 仅微调模型
-python scripts/08_demo_cli.py \
-  --model_path D:/LLM/models/Qwen3-4B \
-  --adapter_path outputs/checkpoints/qwen3-4b-qlora-news-v2
-
-# 对比模式（基座 vs 微调，推荐）
 python scripts/08_demo_cli.py \
   --model_path D:/LLM/models/Qwen3-4B \
   --adapter_path outputs/checkpoints/qwen3-4b-qlora-news-v2 \
   --compare
 ```
 
-#### 4.3.2 批量对比推理
-
-从测试集提取样本，生成基座/微调并排对比结果：
-
-```bash
-# 交互式对比
-python scripts/08_demo_cli.py \
-  --model_path D:/LLM/models/Qwen3-4B \
-  --adapter_path outputs/checkpoints/qwen3-4b-qlora-news-v2 \
-  --compare
-
-# 批量对比（从测试集取 50 条，保存对比结果）
-python scripts/08_demo_cli.py \
-  --model_path D:/LLM/models/Qwen3-4B \
-  --adapter_path outputs/checkpoints/qwen3-4b-qlora-news-v2 \
-  --compare \
-  --input_file data/cleaned/test.json \
-  --output_file outputs/eval/compare_outputs.jsonl \
-  --num_samples 50
-```
-
-两个模型均使用**相同的系统提示词**，区别仅在于有无 LoRA adapter，因此对比结果可以纯粹反映微调带来的格式约束与摘要质量提升。
-
-对比输出格式示例：
-```
-======================================================================
-新闻标题：苹果发布 iPhone 16 系列
-======================================================================
-【基座模型（Base + 系统提示词）】  耗时: 2.341s
-----------------------------------------------------------------------
-（无固定格式，通常为自由文本）这是一款非常好的手机...
-======================================================================
-【微调模型（Fine-tuned + 系统提示词）】  耗时: 2.158s
-----------------------------------------------------------------------
-【一句话摘要】苹果发布 iPhone 16，全系搭载 A18 芯片并支持 Apple Intelligence。
-【核心要点】1. ...  2. ...  3. ...
-【事件类别】科技
-...
-======================================================================
-```
-
-对比结果 JSONL 中每条记录包含 `base_prediction` 和 `ft_prediction` 两个字段，可直接传入 `06_eval_rouge_and_format.py` 分别评测两组结果。
+该脚本用于快速观察：
+- 基座 vs SFT 在同一输入上的输出差异。
+- 结构化格式稳定性提升是否直观可见。
 
 ---
 
-## 5. 评测方法
+### 5.3 AWQ 主线（压缩部署）
 
-本项目主要从**文本生成质量**和**推理性能**两个维度进行量化评估。
+#### 5.3.1 量化目标与范式
 
-### 5.1 在线 Benchmark 对比评测（推荐）
+AWQ 采用 **W4A16（int4 weight-only）**：
+- 权重使用 4-bit 存储。
+- 激活仍为高精度（FP16/BF16）路径。
+- 在控制质量损失的前提下降低磁盘体积和推理时延。
 
-`06_eval_rouge_and_format.py` 支持 `benchmark` 模式，在同一次运行中对比 Base 与 SFT 模型，断点续传、自动写入结果：
+#### 5.3.2 校准集构造（09）
 
 ```bash
-# 仅跑 Group A（Base）和 Group C（SFT V2），跳过 thinking 模式
-python -u scripts/06_eval_rouge_and_format.py \
-  --mode benchmark \
-  --n_samples 0 \
-  --batch_size 4 \
-  --skip_think
-
-# 单独跑 Group B（Base + thinking），建议 batch_size=2
-python -u scripts/06_eval_rouge_and_format.py \
-  --mode benchmark \
-  --n_samples 0 \
-  --batch_size 2 \
-  --only_groups B
-
-# 单独用合并后的 SFT 模型跑 Group C（推荐）
-python -u scripts/06_eval_rouge_and_format.py \
-  --mode benchmark \
-  --n_samples 0 \
-  --batch_size 4 \
-  --merged_model outputs/merged/qwen3-4b-news-v2 \
-  --only_groups C
+python scripts/09_prepare_awq_calib.py \
+  --train data/cleaned/train.json \
+  --output outputs/awq/calib_prompts_chat_strat256.jsonl \
+  --num_samples 256 \
+  --prompt_mode chat_template \
+  --stratified_by_length true \
+  --tokenizer_path outputs/merged/qwen3-4b-news-v2 \
+  --stats_output outputs/awq/calib_stats.json \
+  --seed 42
 ```
 
-当前 `benchmark` 已改为 **Base/SFT 独立加载**：Base 组直接使用基座权重，不再通过 PeftModel 包装后禁用 adapter。输出目录 `outputs/eval/group_{A,B,C}/` 中每组独立保存 JSONL + ROUGE + 格式报告，`benchmark_summary.json` 汇总关键指标。
+本轮收敛关键点：
+- 不再只用原始 input 文本校准，而是改为真实推理时的 `system + user` chat-template 组织。
+- 使用分层抽样（按长度分桶）降低校准样本分布偏差。
 
-### 5.2 离线评测模式（已有预测文件时）
+#### 5.3.3 AWQ 量化执行（10）
 
 ```bash
-# 计算 ROUGE 分数与格式合规率（已有 predictions JSONL 时使用）
-python scripts/06_eval_rouge_and_format.py \
+python scripts/10_quantize_awq.py \
+  --model_path outputs/merged/qwen3-4b-news-v2 \
+  --calib_path outputs/awq/calib_prompts_chat_strat256.jsonl \
+  --output_dir outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --w_bit 4 \
+  --group_size 128 \
+  --zero_point true \
+  --version GEMM \
+  --max_calib_seq_len 1024 \
+  --calib_samples 256 \
+  --seed 42
+```
+
+说明：
+- 主配置使用 `group_size=128`。
+- `version=GEMM` 为量化导出配置；推理端通过 vLLM `awq_marlin` 走高性能 kernel。
+
+#### 5.3.4 冒烟验证（13）
+
+```bash
+python scripts/13_vllm_awq_smoke_infer.py \
+  --model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
   --test data/cleaned/test.json \
-  --predictions outputs/eval/group_C/predictions_raw.jsonl
+  --num_samples 10 \
+  --max_new_tokens 800 \
+  --temperature 0.0 \
+  --top_p 1.0 \
+  --quantization awq_marlin
 ```
 
-**评估指标说明**：
+冒烟的价值：
+- 快速检查模型是否可加载、可生成。
+- 快速检查 6 字段是否稳定输出。
+- 在全量评测前提前暴露 tokenizer 与 kernel 兼容问题。
 
-| 维度 | 指标 | SFT V2 实测 | 说明 |
-|------|------|------------|------|
-| **内容重叠** | ROUGE-1 | 0.7653 | 单词级重叠（jieba 分词） |
-| | ROUGE-2 | 0.5232 | 双词组重叠（Bigram） |
-| | ROUGE-L | 0.7347 | 最长公共子序列 |
-| **格式合规** | 字段完整率 | 100% | 6 个预定义字段全部存在 |
-| | 类别合规率 | 100% | 事件类别在白名单内（支持组合类别） |
-| | 要点格式率 | 100% | 核心要点包含 ≥3 条编号列表 |
+#### 5.3.5 全量质量评测（14）
 
-### 5.3 推理延迟基准测试
+```bash
+python scripts/14_benchmark_quality_vllm.py \
+  --bf16_model_path outputs/merged/qwen3-4b-news-v2 \
+  --awq_model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --test data/cleaned/test.json \
+  --n_samples 0 \
+  --max_new_tokens 800 \
+  --temperature 0.0 \
+  --top_p 1.0 \
+  --repetition_penalty 1.1 \
+  --awq_quantization awq_marlin \
+  --output_dir outputs/eval/awq_benchmark_vllm_q1 \
+  --seed 42
+```
 
-在目标部署硬件上评估单条推理速度（P50/P95 分位延迟）：
+说明：
+- 支持 checkpoint 续跑。
+- 当 BF16 基线已固定，可用 `--awq_only` 只复跑 AWQ 分支。
+
+#### 5.3.6 性能评测（07）
+
+BF16：
 
 ```bash
 python scripts/07_benchmark_latency.py \
+  --backend vllm \
   --model_path outputs/merged/qwen3-4b-news-v2 \
-  --num_samples 20
+  --quantization none \
+  --test data/cleaned/test.json \
+  --num_samples 20 \
+  --warmup_steps 5 \
+  --repeat 30 \
+  --max_new_tokens 800 \
+  --temperature 0.0 \
+  --top_p 1.0 \
+  --report_tag sft_bf16_vllm_promptfix30 \
+  --seed 42
 ```
 
+AWQ：
+
+```bash
+python scripts/07_benchmark_latency.py \
+  --backend vllm \
+  --model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --quantization awq_marlin \
+  --test data/cleaned/test.json \
+  --num_samples 20 \
+  --warmup_steps 5 \
+  --repeat 30 \
+  --max_new_tokens 800 \
+  --temperature 0.0 \
+  --top_p 1.0 \
+  --report_tag sft_awq4_q1_vllm_30 \
+  --seed 42
+```
+
+#### 5.3.7 备选链路（11/12）
+
+- `11_awq_smoke_infer.py`：AutoAWQ 推理冒烟。
+- `12_benchmark_quality_awq.py`：AutoAWQ 后端质量评测。
+
+该链路保留用于兼容性排障，不作为主结论口径。
 
 ---
 
-## 6. 实验结果
+## 6. 实验设置与评测口径
 
-本节汇总 Qwen3-4B QLoRA SFT V2 的量化评测结果，覆盖文本质量、格式合规性与推理效率三类指标。
+### 6.1 对照组定义
 
-### 6.1 实验配置
+SFT 阶段历史对照：
+- Group A：Base（no-think）
+- Group B：Base（think）
+- Group C：SFT merged（no-think）
 
-| 项目 | 配置 |
+AWQ 阶段主对照：
+- BF16：`outputs/merged/qwen3-4b-news-v2`
+- AWQ4：`outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat`
+
+### 6.2 统一解码参数
+
+为保证公平性，BF16 与 AWQ 对比严格固定：
+- `max_new_tokens=800`
+- `temperature=0.0`
+- `top_p=1.0`
+- `repetition_penalty=1.1`
+- `seed=42`
+- 测试集：`data/cleaned/test.json`（481）
+
+### 6.3 质量指标定义
+
+| 指标 | 含义 |
 |------|------|
-| **基座模型** | Qwen3-4B |
-| **微调方法** | QLoRA（4-bit NF4，LoRA rank=8，alpha=16）|
-| **训练数据** | 3,843 条（DeepSeek API 标注，来源 XL-Sum）|
-| **验证集** | 480 条 |
-| **测试集** | 481 条 |
-| **训练步数** | 651 steps（3 epochs）|
-| **训练时长** | ~3.4 小时|
-| **评测框架** | HuggingFace generate + rouge-score + jieba 分词（在线推理）|
-| **推理配置** | batch=4，BF16，thinking=False，temperature=0.1 |
-| **SFT 推理方式** | LoRA 合并后完整模型|
+| ROUGE-1 | 词级重叠 |
+| ROUGE-2 | 二元组重叠 |
+| ROUGE-L | 最长公共子序列重叠 |
+| all_sections_pass_rate | 6 字段完整率 |
+| valid_category_rate | 事件类别白名单合法率 |
+| valid_bullets_rate | 核心要点编号格式与条数合规率 |
+| has_time_info_rate | 时间字段有效率 |
 
-### 6.2 训练过程指标
+### 6.4 性能指标定义
 
-| 指标 | 数值 |
+| 指标 | 含义 |
 |------|------|
-| 最终 Train Loss | 0.9530 |
-| 最终 Eval Loss | 0.9662 |
-| 困惑度（Perplexity）| exp(0.9662) ≈ **2.63** |
-| 最终 Checkpoint | Step 651（3 epochs 完整训练）|
+| load_time_s | 模型加载耗时 |
+| ttft_p50_s / ttft_p95_s | 首 token 延迟分位值 |
+| latency_p50_s / latency_p95_s | 端到端延迟分位值 |
+| tokens_per_s | 吞吐（token/s） |
+| peak_gpu_memory_mb | 峰值显存 |
+| model_disk_size_gb | 模型磁盘体积 |
 
-> Step 651 为最终保存点。训练-验证 loss gap 约为 0.013，模型收敛状态良好，无明显过拟合信号。
+### 6.5 验收阈值
 
-### 6.3 评测结果（测试集 481 条）
+- `ROUGE-L` 相对下降 <= 3%
+- `all_sections_pass_rate` 下降 <= 2%
+- 性能满足其一：
+  - `latency_p50` 改善 >= 15%
+  - 或 `peak_gpu_memory_mb` 下降 >= 25%
 
-#### 6.3.1 文本质量（ROUGE，jieba 分词）
+---
 
-> **实验条件**：A/B/C 三组均使用相同系统提示词。A=Base 不思考，B=Base 思考，C=SFT V2（不思考）。
+## 7. 实验结果与分析
+
+### 7.1 SFT 阶段结果（历史主成果，完整保留）
+
+#### 7.1.1 文本质量（测试集 481）
 
 | 指标 | Group A（Base 不思考） | Group B（Base 思考） | Group C（SFT V2 不思考） | 最优 |
 |------|------------------------|----------------------|---------------------------|------|
-| **ROUGE-1** | 0.6644 | 0.6895 | **0.7653** | C |
-| **ROUGE-2** | 0.4211 | 0.4117 | **0.5232** | C |
-| **ROUGE-L** | 0.6348 | 0.6446 | **0.7347** | C |
+| ROUGE-1 | 0.6644 | 0.6895 | **0.7653** | C |
+| ROUGE-2 | 0.4211 | 0.4117 | **0.5232** | C |
+| ROUGE-L | 0.6348 | 0.6446 | **0.7347** | C |
 
-> B 相比 A：ROUGE-1 +0.0251，ROUGE-2 -0.0094，ROUGE-L +0.0098。该任务下，thinking 对重叠质量未表现出稳定增益。
+相对 A 组提升（C 组）：
+- ROUGE-1：+15.2%
+- ROUGE-2：+24.2%
+- ROUGE-L：+15.7%
 
-#### 6.3.2 格式合规性
+#### 7.1.2 结构化稳定性（测试集 481）
 
 | 指标 | Group A（Base 不思考） | Group B（Base 思考） | Group C（SFT V2 不思考） | 最优 |
 |------|------------------------|----------------------|---------------------------|------|
-| **必需字段完整率** | 97.1% | **100.0%** | **100.0%** | B/C |
-| **类别合规率** | 89.6% | 88.8% | **100.0%** | C |
-| **要点格式率**（≥3 条编号） | 92.1% | 45.3% | **100.0%** | C |
-| **时间信息完整率** | 97.1% | **100.0%** | **100.0%** | B/C |
-| **平均要点条数** | 2.81 | 1.90 | **3.27** | C |
-| **格式错误样本** | 50 / 481 | 54 / 481 | **0 / 481** | C |
+| 必需字段完整率 | 97.1% | 100.0% | **100.0%** | B/C |
+| 类别合规率 | 89.6% | 88.8% | **100.0%** | C |
+| 要点格式率（>=3 条编号） | 92.1% | 45.3% | **100.0%** | C |
+| 时间信息完整率 | 97.1% | 100.0% | **100.0%** | B/C |
+| 平均要点条数 | 2.81 | 1.90 | **3.27** | C |
+| 格式错误样本 | 50/481 | 54/481 | **0/481** | C |
 
-> B 组在「要点格式率」和「类别合规率」上劣于 A 组，说明 Base 开启 thinking 后并未自动改善结构化输出稳定性。
+#### 7.1.3 SFT 阶段效率（历史口径）
 
-#### 6.3.3 推理效率（RTX 5060 Ti 16GB）
+| 组别 | 配置 | 平均速度 |
+|------|------|----------|
+| Group A | Base 不思考，batch=4 | 4.2 s/条 |
+| Group B | Base 思考，batch=2 | 17.7 s/条 |
+| Group C | SFT merged 不思考，batch=4 | **2.9 s/条** |
 
-| 组别 | 配置 | 平均速度 | 相对 A 组 | 说明 |
-|------|------|----------|-----------|------|
-| **Group A** | Base 不思考，batch=4 | 4.2 s/条 | 1.00x | 历史固定基准 |
-| **Group B** | Base 思考，batch=2 | 17.7 s/条 | 4.21x 慢 | 本次完整运行 |
-| **Group C** | SFT V2（merged）不思考，batch=4 | **2.9 s/条** | 0.69x（更快） | 历史固定基准 |
+#### 7.1.4 阶段结论
 
-> 结论：thinking 模式带来显著时延开销（B 约为 A 的 4.21 倍），但并未在格式/ROUGE 上形成稳定收益；C 在质量与速度上保持最优平衡。
+- SFT 明确解决了“结构化不稳定”问题。
+- SFT 同时提升 ROUGE 与格式合规率，形成高质量基础模型。
+- SFT 结果是后续 AWQ 量化的前提；如果 SFT 本身不稳定，量化只会放大不稳定。
 
-#### 6.3.4 结果口径说明
+### 7.2 AWQ 阶段结果（最终采用方案）
 
-- A、C 速度来自既有完整基准（batch=4，no-think）。
-- B 速度来自本次补跑完整任务（batch=2，thinking）。
-- 三组样本规模一致，均为测试集 481 条。
-- 详细字段见 `outputs/eval/benchmark_summary.json`。
+最终配置：`g128 + calib256 + chat-template 校准 + 分层抽样`。
 
-### 6.4 关键观察
+#### 7.2.1 质量对比（BF16 vs AWQ4，481 全量）
 
-1. **C 组质量优势稳定**：C 在 ROUGE-1/2/L 三项均为最优，较 A 分别提升 +0.1009/+0.1021/+0.0999。
+| 指标 | BF16 (merged) | AWQ4 (最终) | 变化 |
+|------|---------------|-------------|------|
+| ROUGE-1 | 0.7064 | 0.6816 | -0.0248 |
+| ROUGE-2 | 0.4598 | 0.4341 | -0.0257 |
+| ROUGE-L | 0.6791 | 0.6578 | **-3.13%** |
+| all_sections_pass_rate | 99.38% | 97.51% | **-1.87%** |
+| valid_category_rate | 98.34% | 97.71% | -0.63% |
+| valid_bullets_rate | 93.97% | 88.15% | -5.82% |
+| has_time_info_rate | 99.38% | 98.13% | -1.25% |
 
-2. **B 组未形成整体质量优势**：B 虽在 ROUGE-1/L 略高于 A，但 ROUGE-2 下降，且格式层面（类别合规、要点编号）明显劣化。
+分析：
+- 格式主指标 `all_sections_pass_rate` 满足阈值（下降 1.87% <= 2%）。
+- `ROUGE-L` 接近阈值边界（-3.13%），属于“可接受但偏紧”的状态。
+- 尾字段和要点格式是主要损失点，后续优化应优先围绕校准分布和解码约束展开。
 
-3. **thinking 延迟成本显著**：B 平均 17.7 s/条，较 A 慢 4.21 倍；在本任务场景下，时延成本高于收益。
+#### 7.2.2 性能对比（20 样本池，warmup=5，repeat=30）
 
-4. **结构化输出最佳方案仍是 SFT V2 no-think**：C 同时实现 0 bad cases、100% 格式指标与更低时延（2.9 s/条），是当前部署优选。
+| 指标 | BF16 | AWQ4 (最终) | 变化 |
+|------|------|-------------|------|
+| load_time_s | 53.67 | 36.99 | -31.1% |
+| ttft_p50_s | 0.0438 | 0.0198 | -54.8% |
+| latency_p50_s | 3.5495 | 1.3844 | -61.0% |
+| latency_p95_s | 5.3610 | 1.7461 | -67.4% |
+| tokens_per_s | 49.81 | 124.86 | 2.51x |
+| model_disk_size_gb | 7.503 | 2.494 | -66.8% |
+| peak_gpu_memory_mb | 16244.8 | 16171.7 | 基本持平 |
 
----
+分析：
+- 时延和吞吐改善显著，端侧收益明显。
+- 显存峰值“接近持平”并不矛盾：vLLM 会把空余预算用于 KV cache 和预留空间。
+- 磁盘体积下降 66.8% 是压缩有效性的直接证据。
 
-## 7. 技术细节
+#### 7.2.3 阶段结论
 
-### 7.1 微调参数配置
+- AWQ 在保持主要质量指标可接受范围内，实现了显著性能收益。
+- 对于信息流端侧场景，最终方案具备落地可行性。
 
-#### 7.1.1 LoRA 与量化设置
-| 参数 | 4B 配置 | 8B 配置 | 设计意图 |
-|------|---------|---------|----------|
-| `quantization_bit` | 4 | 4 | 使用 NF4 格式量化，4B 权重仅约 2.5GB，大幅降低显存门槛 |
-| `lora_target` | all | all | 覆盖所有线性层 (Attention + MLP)，最大化适应能力 |
-| `lora_rank` | 8 | 16 | 8B 模型参数空间更大，提高 Rank 以保证表达能力 |
-| `lora_alpha` | 16 | 32 | 保持 `alpha/rank = 2` 的缩放比例 |
+### 7.3 参数探索（Q2，保留记录但不采用）
 
-#### 7.1.2 训练动态与显存优化
-| 参数 | 4B 配置 | 8B 配置 | 设计意图 |
-|------|---------|---------|----------|
-| `batch_size` | 1 | 1 | 配合梯度累积使用，将单步显存占用降至最低 |
-| `grad_accum` | 16 | 16 | 模拟有效 Batch Size = 16，稳定梯度下降方向 |
-| `cutoff_len` | 1024 | 512 | 8B 模型显存紧张，限制序列长度以防 OOM |
-| `learning_rate` | 2e-4 | 1e-4 | 8B 模型训练稳定性要求更高，降低 LR |
+探索配置：`g64 + calib512 + chat-template + 分层抽样`。
 
-### 7.2 梯度累积原理
+观察结果：
+- ROUGE-L 提升到 `0.6676`（语义重叠更高）。
+- `all_sections_pass_rate` 下降到 `91.68%`（结构稳定性明显退化）。
 
-为在 16GB 显存上模拟大 Batch 训练，采用了 `batch_size=1` + `gradient_accumulation_steps=16` 策略：
+解释：
+- 更细粒度量化组可能保留更多词面相关信息，带来 ROUGE 增益。
+- 但结构协议依赖的“格式控制能力”对量化扰动更敏感，导致字段一致性下降。
 
-1. **前向/反向传播**：每次只计算 1 条数据，累加梯度但不更新权重。
-2. **权重更新**：每累积 16 次后，进行一次 Optimizer Step 并清空梯度。
-3. **效果**：数学上等价于 Batch Size = 16，但显存峰值仅为 Batch Size = 1 的水平。
+结论：
+- Q2 作为参数探索记录保留。
+- 不进入最终推荐配置。
 
-### 7.3 显存观测（推理阶段，Qwen3-4B）
+### 7.4 总体结论（SFT + AWQ 缺一不可）
 
-下表为在 RTX 5060 Ti 16GB 上执行 A/B/C 基准时的 `nvidia-smi` 观察区间（非理论估算）：
-
-| 组别 | 运行配置 | 观测显存占用（MiB） | 结论 |
-|------|----------|---------------------|------|
-| **Group A** | Base，不思考，batch=4 | 约 11,000 ~ 12,000 | 可稳定运行 |
-| **Group B** | Base，thinking，batch=2 | 约 11,700 ~ 12,300 | 可稳定运行 |
-| **Group C** | SFT merged，不思考，batch=4 | 约 10,800 ~ 11,800 | 可稳定运行 |
-
-> 备注：当前文档仅保留实测推理显存结论，不再给出未经复核的训练阶段分项估算。训练显存请以训练日志与实时监控为准。
-
----
-
-## 8. 常见问题
-
-Q: 为什么生成的摘要有时候不包含【核心要点】？
-A: 可能是训练步数不足或 `cutoff_len` 截断了输出。建议检查 ROUGE 报告中的 format rate。
-
-Q: 如何解决 Windows 下的编码错误？
-A: 设置环境变量 `PYTHONUTF8=1`，项目中所有文件读写均已强制指定 `utf-8` 编码。
-
-更多问题请参阅 [docs/troubleshooting.md](docs/troubleshooting.md)。
+- SFT 是能力基础：保证语义质量和结构稳定。
+- AWQ 是部署关键：降低体积和时延，提高吞吐。
+- 最终推荐为当前 AWQ 最终配置（原 Q1 路线），并沿用 vLLM 主评测口径。
 
 ---
 
-## 9. 参考文献
+## 8. 复现流程与命令清单
 
-1. [LLaMA-Factory: Unified Efficient Fine-Tuning of 100+ LLMs](https://github.com/hiyouga/LlamaFactory)
-2. [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314)
-3. [XL-Sum: Large-Scale Multilingual Abstractive Summarization](https://aclanthology.org/2021.findings-acl.413/)
+### 8.1 从零开始（SFT + AWQ 全链）
 
+```bash
+# 1) 数据链路
+python scripts/01_collect_news.py --source xlsum --lang mixed --max_samples 6000
+python scripts/02_generate_labels_api.py --max_samples 0 --concurrency 5
+python scripts/03_validate_and_clean.py
+python scripts/04_split_dataset.py --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1
+python scripts/05_register_dataset_info.py
 
+# 2) SFT
+llamafactory-cli train configs/train_qwen3_4b_qlora_news.yaml
+llamafactory-cli export \
+  --model_name_or_path D:/LLM/models/Qwen3-4B \
+  --adapter_name_or_path outputs/checkpoints/qwen3-4b-qlora-news-v2 \
+  --template qwen3_nothink \
+  --finetuning_type lora \
+  --export_dir outputs/merged/qwen3-4b-news-v2
+
+# 3) SFT 评测
+python scripts/06_eval_rouge_and_format.py --mode benchmark --n_samples 0 --batch_size 4 --skip_think
+
+# 4) AWQ
+python scripts/09_prepare_awq_calib.py \
+  --train data/cleaned/train.json \
+  --output outputs/awq/calib_prompts_chat_strat256.jsonl \
+  --num_samples 256 \
+  --prompt_mode chat_template \
+  --stratified_by_length true \
+  --tokenizer_path outputs/merged/qwen3-4b-news-v2 \
+  --stats_output outputs/awq/calib_stats.json \
+  --seed 42
+
+python scripts/10_quantize_awq.py \
+  --model_path outputs/merged/qwen3-4b-news-v2 \
+  --calib_path outputs/awq/calib_prompts_chat_strat256.jsonl \
+  --output_dir outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --w_bit 4 --group_size 128 --zero_point true --version GEMM \
+  --max_calib_seq_len 1024 --calib_samples 256 --seed 42
+
+python scripts/13_vllm_awq_smoke_infer.py \
+  --model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --test data/cleaned/test.json \
+  --num_samples 10 --max_new_tokens 800 --temperature 0.0 --top_p 1.0 \
+  --quantization awq_marlin
+
+python scripts/14_benchmark_quality_vllm.py \
+  --bf16_model_path outputs/merged/qwen3-4b-news-v2 \
+  --awq_model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --test data/cleaned/test.json --n_samples 0 \
+  --max_new_tokens 800 --temperature 0.0 --top_p 1.0 --repetition_penalty 1.1 \
+  --awq_quantization awq_marlin --output_dir outputs/eval/awq_benchmark_vllm_q1 --seed 42
+
+python scripts/07_benchmark_latency.py \
+  --backend vllm --model_path outputs/merged/qwen3-4b-news-v2 --quantization none \
+  --test data/cleaned/test.json --num_samples 20 --warmup_steps 5 --repeat 30 \
+  --max_new_tokens 800 --temperature 0.0 --top_p 1.0 --report_tag sft_bf16_vllm_promptfix30 --seed 42
+
+python scripts/07_benchmark_latency.py \
+  --backend vllm --model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat --quantization awq_marlin \
+  --test data/cleaned/test.json --num_samples 20 --warmup_steps 5 --repeat 30 \
+  --max_new_tokens 800 --temperature 0.0 --top_p 1.0 --report_tag sft_awq4_q1_vllm_30 --seed 42
+```
+
+### 8.2 仅复跑 AWQ 分支（BF16 已固定）
+
+```bash
+python scripts/14_benchmark_quality_vllm.py \
+  --awq_only \
+  --awq_model_path outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat \
+  --test data/cleaned/test.json \
+  --n_samples 0 \
+  --output_dir outputs/eval/awq_benchmark_vllm_q1_awqonly \
+  --seed 42
+```
+
+### 8.3 关键结果文件索引
+
+- SFT 汇总：`outputs/eval/benchmark_summary.json`
+- AWQ 质量汇总：`outputs/eval/awq_benchmark_vllm_q1/benchmark_summary_awq_vllm.json`
+- BF16 性能：`outputs/eval/latency_report_sft_bf16_vllm_promptfix30.json`
+- AWQ 性能：`outputs/eval/latency_report_sft_awq4_q1_vllm_30.json`
+- 量化报告：`outputs/quantized/qwen3-4b-news-v2-awq4-q1-chatstrat/awq_quantize_report.json`
+
+---
+
+## 9. 工程建议与排障
+
+### 9.1 为什么性能测试与质量测试分开跑
+
+建议分开的原因：
+- 质量评测追求“全量覆盖与稳定统计”。
+- 性能评测追求“可重复的时延统计（warmup/repeat）”。
+- 混跑会互相污染缓存与资源占用，结果解释困难。
+
+### 9.2 为什么 AWQ 模型有时看起来不省显存
+
+- AWQ 确实降低了权重存储占用。
+- 但 vLLM 会把空余预算用于 KV cache，导致峰值显存可能与 BF16 接近。
+- 因此应结合 `model_disk_size_gb`、延迟、吞吐综合判断收益。
+
+### 9.3 10 条冒烟为什么也会慢
+
+常见原因：
+- 首次加载和 kernel 编译开销。
+- 输出上限较高（`max_new_tokens=800`）。
+- 显卡存在残留进程造成资源争用。
+
+### 9.4 常见故障清单
+
+- WSL 更新提示：先运行 `wsl.exe --update` 后重启。
+- 显存爆满：排查残留 python/vLLM 进程。
+- tokenizer 兼容问题：使用脚本自动生成的 tokenizer 修复目录。
+- AWQ 速度异常：确认使用 vLLM `awq_marlin` 而非无加速路径。
+
+更完整排障文档见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+
+---
+
+## 10. 参考文献
+
+1. [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314)
+2. [AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration](https://arxiv.org/abs/2306.00978)
+3. [LLaMA-Factory](https://github.com/hiyouga/LlamaFactory)
+4. [AutoAWQ](https://github.com/casper-hansen/AutoAWQ)
+5. [vLLM](https://docs.vllm.ai/)

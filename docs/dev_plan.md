@@ -1,128 +1,86 @@
-# Edge-News-Summarizer-FT 开发计划
+# Qwen3-4B 结构化摘要项目开发计划（已升级 AWQ 主线）
 
-## 项目概述
+## 项目目标
 
-基于 Qwen + LLaMA-Factory 的新闻结构化摘要微调项目（QLoRA），目标在本地消费级 GPU（RTX 5060 Ti 16GB）上完成端到端的 SFT 流程。
+围绕“端侧信息流结构化摘要”完成一条稳定可复现的工程链路：
+
+- 数据构建与清洗（XL-Sum + DeepSeek 标注）
+- QLoRA SFT（Qwen3-4B）
+- AWQ 后训练量化（W4A16）
+- vLLM 统一推理评测（质量 + 性能）
+
+当前决策：
+- 结论模型采用 `g128 + calib256 + chat-template + 分层抽样`。
+- vLLM 作为主评测后端，AutoAWQ 推理保留为备选链路。
 
 ---
 
 ## 技术路线
 
-```
-原始新闻 → API 打标（GPT-4o-mini）→ 清洗 → Alpaca 格式
-    ↓
-LLaMA-Factory QLoRA 微调（Qwen2.5-3B/7B）
-    ↓
-ROUGE + 格式正确率评测 + CLI Demo
+```text
+原始新闻 -> API 标注 -> 校验清洗 -> train/val/test
+       -> QLoRA SFT (Qwen3-4B)
+       -> AutoAWQ 量化 (W4A16)
+       -> vLLM 冒烟 + 全量质量 + 性能压测
 ```
 
 ---
 
 ## 里程碑
 
-### M1：数据管线（第 1-3 天）
+### M1 数据与 SFT（已完成）
 
-**目标**：能产出可用的训练数据集
+- 数据清洗后可用集：`train/val/test = 3843/480/481`
+- SFT 完成并导出 merged 模型：`outputs/merged/qwen3-4b-news-v2`
+- 基础评测链路（ROUGE + 格式）可复现
 
-- [ ] 收集 5000+ 条新闻（CNN/DailyMail 或本地数据）
-- [ ] 调用 API 生成 2000+ 条结构化标签
-- [ ] 清洗后得到 1500+ 条高质量数据
-- [ ] 划分 train/val/test（8:1:1）
+### M2 AWQ 主链（已完成）
 
-**验收标准**：
-- `data/cleaned/train.json` 存在且有效
-- 格式校验通过率 > 90%
+- 量化链路：`09 -> 10`
+- vLLM 冒烟：`13`
+- vLLM 全量质量：`14`
+- 统一性能评测：`07 --backend vllm`
 
-### M2：训练跑通（第 3-5 天）
+### M3 结论固化与文档化（进行中）
 
-**目标**：3B QLoRA 能完成 1 个 epoch，输出可读摘要
-
-- [ ] 注册数据集到 LLaMA-Factory
-- [ ] 运行 3B QLoRA 训练（`train_qwen25_3b_qlora_news.yaml`）
-- [ ] 保存 LoRA adapter
-- [ ] 用 CLI demo 验证输出质量
-
-**验收标准**：
-- 训练 loss 能降到 1.5 以下
-- 模型能输出包含 6 个字段的结构化摘要
-
-### M3：评测与对比（第 5-7 天）
-
-**目标**：量化微调效果，与基座模型对比
-
-- [ ] 运行 ROUGE 评测（Base vs FT）
-- [ ] 格式正确率对比
-- [ ] 生成至少 20 条 bad case 分析
-- [ ] 延迟评测（P50/P95）
-
-**验收标准**：
-- FT 模型格式正确率 > 90%（Base 通常 < 60%）
-- ROUGE-L 相对提升 > 10%
-
-### M4：Demo 与文档（第 7 天+）
-
-**目标**：可演示、可展示
-
-- [ ] CLI demo 可交互运行
-- [ ] README 包含完整安装/训练/评测步骤
-- [ ] 包含 Base vs FT 输出对比示例
+- 主流程和备选流程分层（vLLM 主链、AutoAWQ 备选）
+- README 与命令清单口径统一
+- 常见故障与排查文档完善
 
 ---
 
-## 数据规格
+## 验收口径
 
-| 字段 | 规格 |
-|------|------|
-| 训练集 | 1200+ 条 |
-| 验证集 | 150+ 条 |
-| 测试集 | 150+ 条 |
-| 输入长度 | 50-4000 字符 |
-| 输出长度 | 100-2000 字符 |
+### 质量
 
----
+- ROUGE-1/2/L
+- all_sections_pass_rate
+- valid_category_rate
+- valid_bullets_rate
+- has_time_info_rate
 
-## 资源需求
+### 性能
 
-| 资源 | 需求 |
-|------|------|
-| GPU 显存 | 16GB（RTX 5060 Ti） |
-| 磁盘空间 | 80GB（模型 + 数据 + checkpoints） |
-| API 费用估算 | ~$5-15（2000 条 × GPT-4o-mini） |
-| 训练时间（3B, 3 epoch） | ~2-4 小时 |
+- load_time_s
+- ttft_p50/p95
+- latency_p50/p95
+- tokens_per_s
+- peak_gpu_memory_mb
+- model_disk_size_gb
 
----
+### 阈值
 
-## 关键配置参数
-
-### 3B QLoRA（推荐首选）
-
-```yaml
-lora_rank: 8
-lora_alpha: 16
-per_device_train_batch_size: 2
-gradient_accumulation_steps: 8
-learning_rate: 2.0e-4
-cutoff_len: 1024
-```
-
-### 7B QLoRA（显存 16GB 边界）
-
-```yaml
-lora_rank: 16
-lora_alpha: 32
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
-learning_rate: 1.0e-4
-cutoff_len: 1024
-```
+- ROUGE-L 相对下降 <= 3%
+- all_sections_pass_rate 下降 <= 2%
+- 性能满足其一：latency_p50 提升 >= 15% 或显存下降 >= 25%
 
 ---
 
-## 风险与应对
+## 当前风险与对策
 
-| 风险 | 概率 | 应对方案 |
-|------|------|----------|
-| bitsandbytes 在 Windows 不兼容 | 中 | 改用 WSL2 跑训练 |
-| API 标注格式合格率低 | 低 | 换更强模型（gpt-4o） |
-| 7B 模型 OOM | 中 | 先用 3B 跑通，再升级 |
-| CNN/DM 数据集下载慢 | 中 | 设置 HF 镜像或用本地数据 |
+- Windows/WSL 混合运行时可能残留 GPU 进程占卡
+  - 对策：统一通过 WSL 跑 vLLM，异常时先清理残留进程再续跑。
+- tokenizer_config 兼容问题导致加载失败
+  - 对策：使用 `*_tokenizerfix` 自动修复目录。
+- 量化参数继续探索可能提升 ROUGE 但破坏格式稳定
+  - 对策：固定最终方案，探索项仅作为附录记录。

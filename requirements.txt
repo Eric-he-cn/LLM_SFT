@@ -12,6 +12,7 @@ transformers==5.2.0
 peft==0.18.1
 accelerate==1.11.0
 bitsandbytes==0.49.2
+autoawq
 
 # Data Processing
 datasets==4.0.0
