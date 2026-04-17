@@ -1,5 +1,7 @@
 # 面向端侧信息流场景的结构化摘要助手（Qwen3-4B + QLoRA SFT + AWQ）
 
+> 更新时间：2026-04-17
+
 基于 **Qwen3-4B + LLaMA-Factory** 的端到端结构化摘要工程，面向 16GB 显存级别硬件，覆盖从数据构建、SFT 微调、AWQ 后训练量化到端侧推理评测的完整闭环。
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -102,6 +104,7 @@ Qwen3-QLoRA-News/
 ├── requirements.txt
 ├── configs/
 │   ├── train_qwen3_4b_qlora_news.yaml
+│   ├── train_qwen3_4b_qlora_news_v2.yaml
 │   ├── train_qwen3_8b_qlora_news.yaml
 │   ├── infer_news.yaml
 │   └── infer_news_base.yaml
@@ -133,6 +136,7 @@ Qwen3-QLoRA-News/
 │       └── 16_awq_recovery_compare.py
 ├── docs/
 │   ├── dev_plan.md
+│   ├── key_configs.md
 │   ├── awq_experiment_commands.md
 │   ├── awq_dvawq_backlog.md
 │   └── troubleshooting.md
@@ -281,7 +285,7 @@ python scripts/05_register_dataset_info.py
 
 SFT 采用 QLoRA 进行参数高效微调：
 - 基座：Qwen3-4B
-- 量化：4-bit NF4
+- 量化：4-bit NF4（bitsandbytes，当前 LLaMA-Factory 默认量化类型）
 - LoRA：rank=8, alpha=16
 - 梯度累积：16（在有限显存下模拟更大 batch）
 
@@ -297,7 +301,7 @@ SFT 采用 QLoRA 进行参数高效微调：
 ```bash
 conda activate my_sft
 
-llamafactory-cli train configs/train_qwen3_4b_qlora_news.yaml
+llamafactory-cli train configs/train_qwen3_4b_qlora_news_v2.yaml
 # 备用：llamafactory-cli train configs/train_qwen3_8b_qlora_news.yaml
 ```
 
@@ -647,7 +651,7 @@ python scripts/04_split_dataset.py --train_ratio 0.8 --val_ratio 0.1 --test_rati
 python scripts/05_register_dataset_info.py
 
 # 2) SFT
-llamafactory-cli train configs/train_qwen3_4b_qlora_news.yaml
+llamafactory-cli train configs/train_qwen3_4b_qlora_news_v2.yaml
 llamafactory-cli export \
   --model_name_or_path D:/LLM/models/Qwen3-4B \
   --adapter_name_or_path outputs/checkpoints/qwen3-4b-qlora-news-v2 \
